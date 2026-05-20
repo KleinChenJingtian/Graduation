@@ -22,10 +22,10 @@ evaluate.py
 #   $env:PYTHONPATH="."
 #
 # ---- 第三步：运行评估 ----
-#   python -m Graduation.src.evaluate `
-#       --data_dir Graduation/data `
-#       --checkpoint Graduation/experiments/20260509_223937/checkpoint.pth `
-#       --clinical Graduation/clinical_eval.csv
+#   python -m src.evaluate `
+#       --data_dir data `
+#       --checkpoint experiments/20260509_223937/checkpoint.pth `
+#       --clinical clinical_eval.csv
 #
 #   参数说明：
 #     --data_dir     MRI 数据目录（含 313 个患者子目录）
@@ -56,8 +56,8 @@ from lifelines.statistics import logrank_test
 from scipy.stats import mannwhitneyu, kruskal
 from sklearn.metrics import silhouette_score, davies_bouldin_score, calinski_harabasz_score
 
-from Graduation.src.dataset import GBMDataset
-from Graduation.src.model import DeepClusteringModel
+from src.dataset import GBMDataset
+from src.model import DeepClusteringModel
 
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -517,7 +517,7 @@ if __name__ == "__main__":
     import os
 
     parser = argparse.ArgumentParser(description="聚类评估 & 生存分析")
-    parser.add_argument("--data_dir", type=str, default="Graduation/data_test",
+    parser.add_argument("--data_dir", type=str, default="data_test",
                         help="数据目录")
     parser.add_argument("--checkpoint", type=str, required=True,
                         help="模型权重路径")

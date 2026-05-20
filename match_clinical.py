@@ -1,6 +1,6 @@
 """
 将临床Excel与MRI患者匹配，并统计各变量缺失情况。
-用法：python Graduation/match_clinical.py
+用法：python match_clinical.py
 """
 import pandas as pd
 import os
@@ -240,5 +240,5 @@ EVAL_PATH = r"D:\codeC\VsCodeP\Graduation\clinical_eval.csv"
 df_eval.to_csv(EVAL_PATH, index=False, encoding="utf-8-sig")
 print(f"\n评估用临床数据已保存至: {EVAL_PATH}")
 print("使用方式:")
-print("  python -m Graduation.src.evaluate --checkpoint <path> --clinical Graduation/clinical_eval.csv")
-print("  python -m Graduation.compare.comparison --checkpoint <path> --clinical Graduation/clinical_eval.csv")
+print("  python -m src.evaluate --checkpoint <path> --clinical clinical_eval.csv")
+print("  python -m compare.comparison --checkpoint <path> --clinical clinical_eval.csv")

@@ -5,13 +5,13 @@
 #   $env:PYTHONPATH="."
 #
 #   从头训练（推荐 batch_size=4，负样本充足）：
-#   python -m Graduation.compare.simclr_pretrain --epochs 100
+#   python -m compare.simclr_pretrain --epochs 100
 #
 #   分段训练（如先训70轮，再续训到150轮）：
-#   python -m Graduation.compare.simclr_pretrain --epochs 70 --output_dir Graduation/experiments/simclr_v1
-#   python -m Graduation.compare.simclr_pretrain --epochs 150 \
-#       --resume Graduation/experiments/simclr_v1/checkpoint_epoch70.pth \
-#       --output_dir Graduation/experiments/simclr_v1
+#   python -m compare.simclr_pretrain --epochs 70 --output_dir experiments/simclr_v1
+#   python -m compare.simclr_pretrain --epochs 150 \
+#       --resume experiments/simclr_v1/checkpoint_epoch70.pth \
+#       --output_dir experiments/simclr_v1
 #
 #   每10轮自动保存完整 checkpoint（encoder + projector + optimizer + scheduler），
 #   最终输出 checkpoint.pth（仅 encoder 权重，供 comparison.py 使用）
@@ -26,8 +26,8 @@ from torch.utils.data import DataLoader
 from torch.amp import autocast, GradScaler
 from datetime import datetime
 
-from Graduation.src.dataset import GBMDataset
-from Graduation.src.model import MultiViewEncoder
+from src.dataset import GBMDataset
+from src.model import MultiViewEncoder
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -136,7 +136,7 @@ def nt_xent_loss(z1, z2, temperature=0.5):
 # 训练主函数
 # ============================================================
 
-def train_simclr(data_dir="Graduation/data",
+def train_simclr(data_dir="data",
                  output_dir=None,
                  epochs=100,
                  batch_size=4,
@@ -306,7 +306,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="SimCLR 对比学习预训练（MRI多模态，支持断点续训）")
-    parser.add_argument("--data_dir", type=str, default="Graduation/data")
+    parser.add_argument("--data_dir", type=str, default="data")
     parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch_size", type=int, default=4)

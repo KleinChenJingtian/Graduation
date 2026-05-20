@@ -15,25 +15,25 @@
 #
 # ---- 第三步：运行对比实验 ----
 # （1）仅聚类对比（无临床数据）：
-#   python -m Graduation.compare.comparison `
-#       --checkpoint Graduation/experiments/20260509_223937/checkpoint.pth
+#   python -m compare.comparison `
+#       --checkpoint experiments/20260509_223937/checkpoint.pth
 #
 # （2）聚类对比 + 生存分析：
-#   python -m Graduation.compare.comparison `
-#       --checkpoint Graduation/experiments/20260509_223937/checkpoint.pth `
-#       --clinical Graduation/clinical_eval.csv
+#   python -m compare.comparison `
+#       --checkpoint experiments/20260509_223937/checkpoint.pth `
+#       --clinical clinical_eval.csv
 #
 # （3）含 SimCLR baseline（需先运行 simclr_pretrain.py）：
-#   python -m Graduation.compare.comparison `
-#       --checkpoint Graduation/experiments/20260509_223937/checkpoint.pth `
-#       --simclr_checkpoint Graduation/experiments/simclr_xxx/checkpoint.pth `
-#       --clinical Graduation/clinical_eval.csv
+#   python -m compare.comparison `
+#       --checkpoint experiments/20260509_223937/checkpoint.pth `
+#       --simclr_checkpoint experiments/simclr_xxx/checkpoint.pth `
+#       --clinical clinical_eval.csv
 #
 #   参数说明：
 #     --checkpoint         YourMethod 模型权重路径（必填）
 #     --clinical           临床数据 CSV（可选，提供则做 KM 生存分析）
 #     --simclr_checkpoint  SimCLR 预训练编码器路径（可选）
-#     --data_dir           MRI 数据目录（默认 Graduation/data）
+#     --data_dir           MRI 数据目录（默认 data）
 #     --K                  强制指定聚类数（默认从模型自动推断）
 #     --n_bootstrap        Bootstrap 轮数（默认 5）
 #
@@ -63,8 +63,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from scipy.optimize import linear_sum_assignment
 
-from Graduation.src.dataset import GBMDataset
-from Graduation.src.model import DeepClusteringModel, MultiViewEncoder
+from src.dataset import GBMDataset
+from src.model import DeepClusteringModel, MultiViewEncoder
 
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -239,7 +239,7 @@ def run_yourmethod_on_subset(dataset, idx, checkpoint_state, n_clusters, device)
 
 def run_comparison(
     checkpoint_path,
-    data_dir="Graduation/data",
+    data_dir="data",
     clinical_path=None,
     simclr_checkpoint=None,
     output_dir=None,
@@ -743,11 +743,11 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="聚类方法全方位对比")
     parser.add_argument("--checkpoint", type=str,
-                        default="Graduation/experiments/20260509_223937/checkpoint.pth",
+                        default="experiments/20260509_223937/checkpoint.pth",
                         help="YourMethod 模型权重路径")
     parser.add_argument("--simclr_checkpoint", type=str, default=None,
                         help="SimCLR 预训练编码器路径（可选，添加 SimCLR+KMeans baseline）")
-    parser.add_argument("--data_dir", type=str, default="Graduation/data",
+    parser.add_argument("--data_dir", type=str, default="data",
                         help="数据目录")
     parser.add_argument("--clinical", type=str, default=None,
                         help="临床信息CSV（含 patient_id, time, event 列）")

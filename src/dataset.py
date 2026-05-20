@@ -235,7 +235,7 @@ class GBMDataset(Dataset):
         self.patients = []
 
         for d in os.listdir(root_dir):
-        #  # os.listdir(root_dir) 会返回 root_dir 目录下的所有文件和文件夹的名字列表。比如如果 root_dir 是 "Graduation/data"，返回 ["patient0012", "patient0013", "notes.txt"] 这样的列表。
+        #  # os.listdir(root_dir) 会返回 root_dir 目录下的所有文件和文件夹的名字列表。比如如果 root_dir 是 "data"，返回 ["patient0012", "patient0013", "notes.txt"] 这样的列表。
             patient_dir = os.path.join(root_dir, d)
             if not os.path.isdir(patient_dir):
                 continue
@@ -284,10 +284,10 @@ class GBMDataset(Dataset):
 # ============================================================
 
 if __name__ == "__main__":
-    dataset = GBMDataset("Graduation/data_test")   # Python 中，相对路径是相对于终端当前所在位置计算的。
-    # 在项目根目录D:\codeC\VsCodeP>下运行这个脚本，那么 "Graduation/data_test" 就是正确的路径。
+    dataset = GBMDataset("data_test")   # Python 中，相对路径是相对于终端当前所在位置计算的。
+    # 在项目根目录D:\codeC\VsCodeP>下运行这个脚本，那么 "data_test" 就是正确的路径。
     # 如果进入到src目录下运行，将上面修改为../data_test 就可以了，其中 .. 代表上一层目录 
-    # 如果要保持原来的路径"Graduation/data_test"不变，可以在终端中直接运行 python Graduation/src/dataset.py，这样相对路径就不会出问题了。
+    # 如果要保持原来的路径"data_test"不变，可以在终端中直接运行 python src/dataset.py，这样相对路径就不会出问题了。
     x, mask, pid = dataset[0]
     print(pid)
     print("Images shape:", x.shape)  # [4, H, W, D]

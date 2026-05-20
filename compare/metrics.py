@@ -6,11 +6,11 @@
 # 使用方法：
 
 # 1. 先修改第129行的 checkpoint 路径为实际路径
-# checkpoint_path = "Graduation/experiments/你实际的文件夹/checkpoint.pth"
+# checkpoint_path = "experiments/你实际的文件夹/checkpoint.pth"
 
 # 2. 运行：
 # $env:PYTHONPATH="."
-# python -m Graduation.compare.metrics
+# python -m compare.metrics
 
 
 import numpy as np
@@ -117,21 +117,21 @@ if __name__ == "__main__":
     import os
     import torch
     from torch.utils.data import DataLoader
-    from Graduation.src.dataset import GBMDataset
-    from Graduation.src.model import DeepClusteringModel
+    from src.dataset import GBMDataset
+    from src.model import DeepClusteringModel
 
 
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # 加载模型和数据
     print("加载模型和数据...")
-    dataset = GBMDataset("Graduation/data")
+    dataset = GBMDataset("data")
     loader = DataLoader(dataset, batch_size=4, shuffle=False)
 
     model = DeepClusteringModel(num_modalities=4, feature_dim=256, max_K=10).to(DEVICE)
 
     # 从最新checkpoint加载
-    checkpoint_path = "Graduation/experiments/20260504_092551/checkpoint.pth"  # 这里在使用前需要修改
+    checkpoint_path = "experiments/20260504_092551/checkpoint.pth"  # 这里在使用前需要修改
     
     checkpoint = torch.load(checkpoint_path, map_location=DEVICE, weights_only=False)
     model.load_state_dict(checkpoint["model_state"])
