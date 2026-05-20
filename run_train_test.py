@@ -6,6 +6,8 @@ from src.model import DeepClusteringModel
 
 DEVICE = torch.device("cuda")
 
+# test
+
 dataset = GBMDataset("Graduation/data_test")
 loader = DataLoader(dataset, batch_size=2, shuffle=True) # 这个语句的作用是创建一个数据加载器（DataLoader）对象，用于从给定的数据集（dataset）中加载数据。具体来说：
 # batch_size=2: 这指定了每个批次（batch）中包含的数据样本数量。在这个例子中，每个批次将包含2个样本。
