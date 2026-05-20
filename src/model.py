@@ -384,7 +384,10 @@ class DeepClusteringModel(nn.Module):
 
         # soft assignment with π_k
         mu = self.cluster.mu   # [K, feature_dim]
-        dist2 = ((z.unsqueeze(1) - mu.unsqueeze(0)) ** 2).sum(2)
+        # batch centering：消除均值漂移对 dist² 的影响
+        # 防止 ||z||↑ 让 q 变尖锐 → 投机取巧降低 L_ac / entropy
+        z_centered = z - z.mean(dim=0, keepdim=True)
+        dist2 = ((z_centered.unsqueeze(1) - mu.unsqueeze(0)) ** 2).sum(2)
 
         # 1. 平滑先验（0.001，避免数值爆炸）
         clean_pi = clean_pi + 0.001
@@ -400,7 +403,7 @@ class DeepClusteringModel(nn.Module):
         else:
             pi_weight = 1.0
 
-        # 放大距离差异，打破原点死锁
+        # 放大距离差异（z已centering，dist²均值稳定）
         logits = (-5.0 * dist2 + pi_weight * torch.log(clean_pi + 1e-8)) / temp
         q = F.softmax(logits, dim=1)
 

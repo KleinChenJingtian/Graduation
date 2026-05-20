@@ -280,8 +280,14 @@ def train(
         if epoch % 5 == 0 or epoch == epochs - 1:
             save_pi_distribution(clean_pi, epoch, exp_dir)
 
-        # 保存 checkpoint（第40轮起每10轮+最后1轮）
-        if (epoch >= 40 and epoch % 10 == 0) or epoch == epochs - 1:
+        # 保存 checkpoint
+        # - 每10轮保存最新的 checkpoint.pth（用于断点续训）
+        # - 第40轮起另外保存 checkpoint_epoch{epoch}.pth（用于后续对比）
+        # - 最后1轮两者都保存
+        if epoch % 10 == 0 or epoch == epochs - 1:
+            save_checkpoint(model, optimizer, epoch, exp_dir,
+                            filename="checkpoint.pth")
+        if epoch >= 40 and epoch % 10 == 0:
             save_checkpoint(model, optimizer, epoch, exp_dir,
                             filename=f"checkpoint_epoch{epoch}.pth")
 
