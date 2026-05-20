@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Medical imaging data (large .nii.gz files)
+data/
+data_test/
+*.nii.gz
+
+# Model checkpoints (very large)
+*.pth
+experiments/
+
+# Experiment / evaluation outputs
+compare_results/
+evaluation_results/
+
+# Excel clinical data (sensitive)
+*.xlsx
+
+# Claude local settings
+.claude/
+
+# Logs
+*.log
+logs/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
