@@ -280,9 +280,10 @@ def train(
         if epoch % 5 == 0 or epoch == epochs - 1:
             save_pi_distribution(clean_pi, epoch, exp_dir)
 
-        # 保存 checkpoint（每10轮+最后1轮）
-        if epoch % 10 == 0 or epoch == epochs - 1:
-            save_checkpoint(model, optimizer, epoch, exp_dir)
+        # 保存 checkpoint（第40轮起每10轮+最后1轮）
+        if (epoch >= 40 and epoch % 10 == 0) or epoch == epochs - 1:
+            save_checkpoint(model, optimizer, epoch, exp_dir,
+                            filename=f"checkpoint_epoch{epoch}.pth")
 
         # 【新增】：诊断输出（每 diagnostic_every 轮）
         # 暂时禁用：Windows上 DataLoader+UMAP+multiprocessing 容易死锁
