@@ -1,41 +1,36 @@
 # compare/comparison.py
-# 全方位聚类方法对比：YourMethod / DEC / IDEC-Var / K-Means / GMM
+# 聚类方法对比（端到端 Reconstruction 方案）
+# 对比：Ours (E2E) / DEC / IDEC-Var / K-Means / GMM / SimCLR+KMeans
 # 输出：内部指标 + Bootstrap稳定性 + kNN一致性 + π分布 + UMAP可视化 + KM曲线
 #
 # ============================================================
-# 运行方式（在项目根目录 D:\codeC\VsCodeP 下执行）
+# 完整流程（在项目根目录下执行）
 # ============================================================
 #
-# ---- 第一步：生成临床数据（只需执行一次）----
+# ---- 第〇步：生成临床数据（只需执行一次）----
 #   python match_clinical.py
-#   输出：clinical_eval.csv（评估专用，313 行 × 7 列）
 #
-# ---- 第二步：设置环境变量 ----
+# ---- 第一步：端到端训练 ----
 #   $env:PYTHONPATH="."
+#   python -m run_train --epochs 150
 #
-# ---- 第三步：运行对比实验 ----
-# （1）仅聚类对比（无临床数据）：
-#   python -m compare.comparison `
-#       --checkpoint experiments/20260509_223937/checkpoint.pth
+# ---- 第二步：（可选）SimCLR 预训练 ----
+#   python -m compare.simclr_pretrain --epochs 100 --batch_size 4
 #
-# （2）聚类对比 + 生存分析：
+# ---- 第三步：全方法对比评估 ----
+#   （1）仅聚类对比（无 SimCLR baseline）：
+#   python -m compare.comparison --checkpoint experiments/20260504_092551/checkpoint.pth
+#
+#   （2）聚类对比 + SimCLR+KMeans baseline：
 #   python -m compare.comparison `
-#       --checkpoint experiments/20260509_223937/checkpoint.pth `
+#       --checkpoint experiments/20260504_092551/checkpoint.pth `
+#       --simclr_checkpoint experiments/simclr_v1/checkpoint.pth
+#
+#   （3）聚类对比 + 生存分析：
+#   python -m compare.comparison `
+#       --checkpoint experiments/20260504_092551/checkpoint.pth `
+#       --simclr_checkpoint experiments/simclr_v1/checkpoint.pth `
 #       --clinical clinical_eval.csv
-#
-# （3）含 SimCLR baseline（需先运行 simclr_pretrain.py）：
-#   python -m compare.comparison `
-#       --checkpoint experiments/20260509_223937/checkpoint.pth `
-#       --simclr_checkpoint experiments/simclr_xxx/checkpoint.pth `
-#       --clinical clinical_eval.csv
-#
-#   参数说明：
-#     --checkpoint         YourMethod 模型权重路径（必填）
-#     --clinical           临床数据 CSV（可选，提供则做 KM 生存分析）
-#     --simclr_checkpoint  SimCLR 预训练编码器路径（可选）
-#     --data_dir           MRI 数据目录（默认 data）
-#     --K                  强制指定聚类数（默认从模型自动推断）
-#     --n_bootstrap        Bootstrap 轮数（默认 5）
 #
 # ---- 评估输出（保存在 compare_results/<实验名>/full_comparison/ 下）----
 #   comparison_report.json        完整对比报告
@@ -189,13 +184,13 @@ def run_idec_var(z_all, n_clusters, epochs=30, alpha=1.0, lr=0.01, var_weight=0.
 
 def run_yourmethod_on_subset(dataset, idx, checkpoint_state, n_clusters, device):
     """
-    YourMethod 在数据子集上重新推理：
+    Ours (E2E) 在数据子集上重新推理：
     加载模型 → 只在指定样本上 forward → 返回硬标签
     """
     boot_dataset = Subset(dataset, idx)
     boot_loader = DataLoader(boot_dataset, batch_size=4, shuffle=False)
 
-    model_boot = DeepClusteringModel(num_modalities=4, feature_dim=256, max_K=10).to(device)
+    model_boot = DeepClusteringModel(num_modalities=4, feature_dim=128, max_K=10).to(device)
     model_boot.load_state_dict(checkpoint_state, strict=False)
     model_boot.eval()
 
@@ -263,7 +258,7 @@ def run_comparison(
     dataset = GBMDataset(data_dir)
     loader = DataLoader(dataset, batch_size=4, shuffle=False)
 
-    model = DeepClusteringModel(num_modalities=4, feature_dim=256, max_K=10).to(DEVICE)
+    model = DeepClusteringModel(num_modalities=4, feature_dim=128, max_K=10).to(DEVICE)
     checkpoint = torch.load(checkpoint_path, map_location=DEVICE, weights_only=False)
     model.load_state_dict(checkpoint["model_state"])
     model.eval()
@@ -330,7 +325,7 @@ def run_comparison(
     labels_gmm = GaussianMixture(n_components=n_clusters, random_state=42, covariance_type="full", n_init=5).fit_predict(z_all)
 
     all_labels = {
-        "YourMethod": labels_your,
+        "Ours (E2E)": labels_your,
         "DEC": labels_dec,
         "IDEC-Var": labels_idec,
         "KMeans": labels_kmeans,
@@ -481,8 +476,8 @@ def run_comparison(
     boot_indices = [np.random.choice(n_samples, int(n_samples * bootstrap_ratio), replace=False)
                     for _ in range(n_bootstrap)]
 
-    # --- YourMethod：重新加载模型在 bootstrap 样本上 forward ---
-    print("  YourMethod: 重新加载模型推理...")
+    # --- Ours (E2E)：重新加载模型在 bootstrap 样本上 forward ---
+    print("  Ours (E2E): 重新加载模型推理...")
     your_nmi_list, your_ari_list = [], []
     for boot_i, idx in enumerate(boot_indices):
         labels_boot_your = run_yourmethod_on_subset(dataset, idx, checkpoint_state, n_clusters, DEVICE)
@@ -491,15 +486,15 @@ def run_comparison(
         your_nmi_list.append(normalized_mutual_info_score(labels_ref_your, labels_boot_aligned))
         your_ari_list.append(adjusted_rand_score(labels_ref_your, labels_boot_aligned))
         print(f"    Bootstrap {boot_i+1}/{n_bootstrap} 完成")
-    stability_results["YourMethod"] = {
+    stability_results["Ours (E2E)"] = {
         "nmi_mean": float(np.mean(your_nmi_list)), "nmi_std": float(np.std(your_nmi_list)),
         "ari_mean": float(np.mean(your_ari_list)), "ari_std": float(np.std(your_ari_list)),
     }
-    print(f"  YourMethod: NMI={np.mean(your_nmi_list):.4f}±{np.std(your_nmi_list):.4f}, "
+    print(f"  Ours (E2E): NMI={np.mean(your_nmi_list):.4f}±{np.std(your_nmi_list):.4f}, "
           f"ARI={np.mean(your_ari_list):.4f}±{np.std(your_ari_list):.4f}")
 
     # --- DEC / IDEC-Var / KMeans / GMM / SimCLR+KMeans：纯特征空间重聚 ---
-    other_methods = [name for name in all_labels.keys() if name != "YourMethod"]
+    other_methods = [name for name in all_labels.keys() if name != "Ours (E2E)"]
     for name in other_methods:
         # SimCLR+KMeans 使用 SimCLR 特征空间
         z_ref = z_simclr if (name == "SimCLR+KMeans" and z_simclr is not None) else z_all
@@ -545,7 +540,7 @@ def run_comparison(
             knn_results[name] = {"error": str(e)}
 
     # ============================================================
-    # 5. π vs q̄ 分布图 (仅 YourMethod)
+    # 5. π vs q̄ 分布图 (仅 Ours E2E)
     # ============================================================
     print("\n" + "=" * 60)
     print("π vs q̄ 分布对比...")
@@ -561,7 +556,7 @@ def run_comparison(
     ax.bar(x + width/2, q_aligned, width, label="q̄ (Average soft assignment)", color="coral", alpha=0.8)
     ax.set_xlabel("Cluster")
     ax.set_ylabel("Probability")
-    ax.set_title(f"Your Method: π vs q̄ (K_eff={K_eff})")
+    ax.set_title(f"Ours (E2E): π vs q̄ (K_eff={K_eff})")
     ax.legend()
     ax.set_xticks(x)
     plt.tight_layout()
@@ -575,7 +570,7 @@ def run_comparison(
     print("\n" + "=" * 60)
     print("UMAP 可视化...")
 
-    # UMAP: YourMethod特征空间
+    # UMAP: Ours (E2E) 特征空间
     try:
         from umap import UMAP
         reducer = UMAP(n_components=2, random_state=42, n_neighbors=15, min_dist=0.1)
@@ -742,9 +737,8 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="聚类方法全方位对比")
-    parser.add_argument("--checkpoint", type=str,
-                        default="experiments/20260509_223937/checkpoint.pth",
-                        help="YourMethod 模型权重路径")
+    parser.add_argument("--checkpoint", type=str, required=True,
+                        help="Ours (E2E) 端到端模型 checkpoint 路径（必填）")
     parser.add_argument("--simclr_checkpoint", type=str, default=None,
                         help="SimCLR 预训练编码器路径（可选，添加 SimCLR+KMeans baseline）")
     parser.add_argument("--data_dir", type=str, default="data",
@@ -770,5 +764,5 @@ if __name__ == "__main__":
         output_dir=args.output_dir,
         n_clusters=args.K,
         n_bootstrap=args.n_bootstrap,
-        k_neighbors=args.k_knn,
+        k_neighbors=args.k_knn
     )
