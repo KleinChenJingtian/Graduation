@@ -11,9 +11,9 @@ from torch.amp import autocast, GradScaler
 from torch.utils.data import DataLoader
 from datetime import datetime
 
-from Graduation.src.dataset import GBMDataset
-from Graduation.src.model import DeepClusteringModel
-from Graduation.src.utils import (
+from src.dataset import GBMDataset
+from src.model import DeepClusteringModel
+from src.utils import (
     make_experiment_dir,
     TBLogger,
     save_checkpoint,
@@ -133,7 +133,7 @@ def run_diagnostic(model, loader, device, epoch, output_dir):
 def train(
     data_dir,
     device,
-    batch_size=4,
+    batch_size=8,
     epochs=50,
     lr=1e-5,
     beta=1.0,
@@ -286,7 +286,7 @@ def train(
 
         # 【新增】：诊断输出（每 diagnostic_every 轮）
         # 暂时禁用：Windows上 DataLoader+UMAP+multiprocessing 容易死锁
-        # 训练完成后用 python -m Graduation.compare.diagnostic 手动诊断
+        # 训练完成后用 python -m compare.diagnostic 手动诊断
         # if diagnostic_every is not None and (epoch % diagnostic_every == 0 or epoch == epochs - 1):
         #     run_diagnostic(model, loader, device, epoch, diag_base_dir)
 

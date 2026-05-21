@@ -1,7 +1,7 @@
 # from src.dataset import GBMDataset, load_patient
 
 # # 测试 patient0151（已知有FLAIR_2MM）
-# dataset = GBMDataset("Graduation/data")
+# dataset = GBMDataset("data")
 # print(f"数据集患者数: {len(dataset)}")
 
 # # 直接加载patient0151，检查是否触发重采样
@@ -18,7 +18,7 @@
 
 # 测试 check_modality_files 函数
 # from src.dataset import check_modality_files
-# valid, missing, needs = check_modality_files('D:/codeC/VsCodeP/Graduation/data/patient0151')
+# valid, missing, needs = check_modality_files('D:/codeC/VsCodeP/data/patient0151')
 # print('valid:', valid)
 # print('missing:', missing)
 # print('needs_resample:', needs)
@@ -29,7 +29,7 @@
 # from src.dataset import load_patient
 # import os
 
-# p = 'D:/codeC/VsCodeP/Graduation/data/patient0151'
+# p = 'D:/codeC/VsCodeP/data/patient0151'
 # print('Files in dir:', os.listdir(p))
 
 # images, mask, mod_mask = load_patient(p)
@@ -41,7 +41,7 @@
 # import nibabel as nib
 # import numpy as np
 
-# p = 'D:/codeC/VsCodeP/Graduation/data/patient0151/FLAIR_2MM_to_MNI.nii.gz'
+# p = 'D:/codeC/VsCodeP/data/patient0151/FLAIR_2MM_to_MNI.nii.gz'
 # img = nib.load(p)
 # affine = img.affine
 # voxel_size = np.abs(np.diag(affine[:3, :3]))
@@ -52,7 +52,7 @@
 
 
 # import torch
-# from Graduation.src.model import DeepClusteringModel
+# from src.model import DeepClusteringModel
 
 # model = DeepClusteringModel(num_modalities=4, feature_dim=128, max_K=10)
 # x = torch.randn(2, 4, 182, 218, 182)
@@ -77,7 +77,7 @@
 
 
 # import torch
-# from Graduation.src.model import MultiViewEncoder
+# from src.model import MultiViewEncoder
 
 # encoder = MultiViewEncoder(num_modalities=4, feature_dim=128)
 # x = torch.randn(2, 4, 182, 218, 182)
@@ -100,7 +100,7 @@
 # print('After encoder:', z.shape)
 
 import torch
-from Graduation.src.model import DeepClusteringModel
+from src.model import DeepClusteringModel
 
 model = DeepClusteringModel(num_modalities=4, feature_dim=128, max_K=10)
 print('模型参数量:', sum(p.numel() for p in model.parameters()))

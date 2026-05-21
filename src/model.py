@@ -382,9 +382,10 @@ class DeepClusteringModel(nn.Module):
         ]).cumprod(0)
         clean_pi = clean_v * remaining_stick  # [K]，参与梯度计算
 
-        # soft assignment with π_k
+        # soft assignment with π_k（z 先centering，防均值漂移让q变尖锐）
         mu = self.cluster.mu   # [K, feature_dim]
-        dist2 = ((z.unsqueeze(1) - mu.unsqueeze(0)) ** 2).sum(2)
+        z_centered = z - z.mean(dim=0, keepdim=True)
+        dist2 = ((z_centered.unsqueeze(1) - mu.unsqueeze(0)) ** 2).sum(2)
 
         # 1. 平滑先验（0.001，避免数值爆炸）
         clean_pi = clean_pi + 0.001
@@ -400,14 +401,11 @@ class DeepClusteringModel(nn.Module):
         else:
             pi_weight = 1.0
 
-        # 放大距离差异，打破原点死锁
+        # 放大距离差异
         logits = (-5.0 * dist2 + pi_weight * torch.log(clean_pi + 1e-8)) / temp
         q = F.softmax(logits, dim=1)
 
         # losses
-        # 【关键修复】：L_intra 直接用 self.cluster.mu（而非mu_batch）
-        # 原因：mu_batch 会让 self.cluster.mu 脱离梯度流，导致它永远停在原点
-        # 用 self.cluster.mu 算梯度，梯度直接流向可学习参数，让它真正被更新
         L_intra = self.cluster.intra_loss(z, q, mu)
         L_inter = self.cluster.inter_loss()
 
@@ -420,18 +418,20 @@ class DeepClusteringModel(nn.Module):
         L_var = self.varloss(z)
         L_vicreg = self.vicreg(z)
         L_entropy = self.entropy_loss(q)
-        # L_uniform = self.uniform_loss(q)  # 【暂时注释】：删除uniform后观察分布
 
         # 4. 课程式熵约束
-        if epoch < 20:
-            entropy_weight = 0.02
-        elif epoch < 50:
+        if epoch < 30:
             entropy_weight = 0.01
         else:
             entropy_weight = 0.005
 
-        # 5. 终极 Loss（驯服版VICReg + 正确的EM逻辑）
-        # VICReg 内部已有 var_weight=1.0，代替原来的 L_var
-        L_total = 1.0 * L_intra + 0.1 * L_inter + self.beta * L_ac - entropy_weight * L_entropy + 1.0 * L_vicreg
+        # 5. 终极 Loss
+        # 【P1】L_intra 1.0→0.1：降低cluster pressure，保护feature geometry
+        # 【P2】VICReg 1.0→5.0：适度加强防塌缩，不暴力破坏聚类结构
+        # 【P3】epoch<20 warmup：仅 encoder+VICReg，聚类head在表示形成后再介入
+        if epoch < 20:
+            L_total = 5.0 * L_vicreg
+        else:
+            L_total = 0.1 * L_intra + 0.1 * L_inter + self.beta * L_ac - entropy_weight * L_entropy + 5.0 * L_vicreg
 
         return z, q, clean_pi, L_total, L_intra, L_inter, L_ac, L_var, L_vicreg

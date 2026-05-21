@@ -4,7 +4,7 @@
 # 使用方法：
 # 1. 先修改 checkpoint 路径
 # 2. 设置 PYTHONPATH：$env:PYTHONPATH="."
-# 3. 运行：python -m Graduation.compare.diagnostic
+# 3. 运行：python -m compare.diagnostic
 
 import os
 import numpy as np
@@ -17,8 +17,8 @@ import matplotlib.pyplot as plt
 from datetime import datetime
 from umap import UMAP
 
-from Graduation.src.dataset import GBMDataset
-from Graduation.src.model import DeepClusteringModel
+from src.dataset import GBMDataset
+from src.model import DeepClusteringModel
 
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -27,7 +27,7 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 def run_diagnostic(checkpoint_path, output_dir):
     """运行所有诊断检查"""
     print("加载模型和数据...")
-    dataset = GBMDataset("Graduation/data")
+    dataset = GBMDataset("data")
     loader = DataLoader(dataset, batch_size=4, shuffle=False)
 
     model = DeepClusteringModel(num_modalities=4, feature_dim=256, max_K=10).to(DEVICE)
@@ -178,11 +178,11 @@ def run_diagnostic(checkpoint_path, output_dir):
 
 if __name__ == "__main__":
     # 【需要修改】checkpoint路径
-    checkpoint_path = "Graduation/experiments/20260509_223937/checkpoint.pth"
+    checkpoint_path = "experiments/20260509_223937/checkpoint.pth"
 
     # 从checkpoint路径中提取时间戳作为输出目录名
-    # 格式：Graduation/experiments/20260509_171534/checkpoint.pth → 20260509_171534
-    checkpoint_dir = os.path.dirname(checkpoint_path)  # .../Graduation/experiments/20260509_171534
+    # 格式：experiments/20260509_171534/checkpoint.pth → 20260509_171534
+    checkpoint_dir = os.path.dirname(checkpoint_path)  # .../experiments/20260509_171534
     exp_name = os.path.basename(checkpoint_dir)        # 20260509_171534
     output_dir = os.path.join("Graduation", "compare_results", exp_name)
     os.makedirs(output_dir, exist_ok=True)

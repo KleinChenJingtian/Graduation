@@ -13,15 +13,15 @@ from torch.utils.tensorboard import SummaryWriter
 # 实验目录管理
 # ============================================================
 
-def make_experiment_dir(base_dir="Graduation/experiments", exp_name=None):
+def make_experiment_dir(base_dir="experiments", exp_name=None):
     """
     创建实验目录，用时间戳区分不同实验
     """
     if exp_name is None:
         exp_name = datetime.now().strftime("%Y%m%d_%H%M%S") # strftime的作用是将时间对象转换为指定格式的字符串
 
-    exp_dir = os.path.join(base_dir, exp_name) # 例如 Graduation/experiments/20260402_163005
-    os.makedirs(exp_dir, exist_ok=True) # os.makedirs: 递归创建文件夹。如果父目录 Graduation/experiments 不存在，它会连带着一起建好。exist_ok=True: 如果文件夹已经存在，不会抛出异常。
+    exp_dir = os.path.join(base_dir, exp_name) # 例如 experiments/20260402_163005
+    os.makedirs(exp_dir, exist_ok=True) # os.makedirs: 递归创建文件夹。如果父目录 experiments 不存在，它会连带着一起建好。exist_ok=True: 如果文件夹已经存在，不会抛出异常。
 
     return exp_dir
 
@@ -80,7 +80,7 @@ def save_checkpoint(model, optimizer, epoch, exp_dir, filename="checkpoint.pth")
     保存模型与优化器状态
     """
     path = os.path.join(exp_dir, filename)
-    # 例如 Graduation/experiments/20260402_1700/checkpoint.pth
+    # 例如 experiments/20260402_1700/checkpoint.pth
     torch.save({    # torch.save 将一个 Python 字典 序列化并写入硬盘
         "epoch": epoch,
         "model_state": model.state_dict(),   # state_dict() 是一个特殊的字典，里面存的是每一层神经网络的权重和偏置的数值。
@@ -121,7 +121,7 @@ def save_pi_distribution(pi, epoch, exp_dir):
     plt.tight_layout()  # 自动调整子图参数，使之填充整个图像区域
 
     path = os.path.join(exp_dir, f"pi_epoch_{epoch:03d}.png")  # 03d 是一个格式化指令：d：表示这是一个整数，03：表示这个整数至少占3位，不足的部分用0填充。例如，如果epoch=5，那么{epoch:03d}会被格式化为"005"。
-    # 例如 Graduation/experiments/20260402_1700/pi_epoch_005.png
+    # 例如 experiments/20260402_1700/pi_epoch_005.png
     plt.savefig(path)   # 将图片保存到之前创建的实验目录下
     plt.close()  # 每次绘图后必须关闭画布
 

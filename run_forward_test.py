@@ -9,7 +9,7 @@ from src.model import DeepClusteringModel
 # 基本配置
 # ============================================================
 
-DATA_DIR = "Graduation/data_test"     # 小数据集，forward 测试
+DATA_DIR = "data_test"     # 小数据集，forward 测试
 NUM_MODALITIES = 4
 FEATURE_DIM = 128
 MAX_K = 10
