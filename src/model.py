@@ -103,11 +103,47 @@ class MultiViewEncoder(nn.Module):
         # [B, 4, 576] → flatten(1) → [B, 2304]
         fused = tokens.flatten(1)
         z = self.mlp(fused)  # [B, 2304] → [B, 256]
-        # 不再 L2 归一化：L2 将 per-dim std 锁死在 ~1/√256≈0.06，
-        # 与 VICReg var target (std≥1.0) 冲突，导致特征方差崩溃至 0.002。
-        # 防塌缩职责完全交给 VICRegLoss（var_weight=1.0, cov_weight=0.05）。
-
+        # 不做 L2 归一化：重建 loss 天然约束特征流形，无需强制归一化
         return z
+
+
+# ============================================================
+# 轻量级 Decoder（3D 反卷积，低分辨率重建）
+# ============================================================
+
+class LightweightDecoder(nn.Module):
+    """
+    从 z [B, 256] 反卷积重建 4 个模态的 MRI 输入。
+    目标分辨率 32³（原图的 1/4~1/8），轻量级。
+    """
+    def __init__(self, feature_dim=256, num_modalities=4, target_size=32):
+        super().__init__()
+        self.target_size = target_size
+        self.num_modalities = num_modalities
+
+        init_size = target_size // 8       # 32 → 4，3 次上采样
+        init_channels = 64
+        self.init_size = init_size
+        self.init_channels = init_channels
+
+        init_volume = init_channels * (init_size ** 3)
+
+        self.fc = nn.Linear(feature_dim, init_volume)
+
+        # 3 层 ConvTranspose3d: 4→8→16→32
+        self.deconv = nn.Sequential(
+            nn.ConvTranspose3d(64, 32, 3, stride=2, padding=1, output_padding=1),
+            nn.ReLU(),
+            nn.ConvTranspose3d(32, 16, 3, stride=2, padding=1, output_padding=1),
+            nn.ReLU(),
+            nn.ConvTranspose3d(16, num_modalities, 3, stride=2, padding=1, output_padding=1),
+        )
+
+    def forward(self, z):
+        B = z.shape[0]
+        h = self.fc(z)
+        h = h.view(B, self.init_channels, self.init_size, self.init_size, self.init_size)
+        return self.deconv(h)  # [B, 4, 32, 32, 32]
 
 
 # ============================================================
@@ -333,6 +369,7 @@ class DeepClusteringModel(nn.Module):
     def __init__(self, num_modalities=4, feature_dim=128, max_K=10, beta=1.0, gamma=0.05):
         super().__init__()
         self.encoder = MultiViewEncoder(num_modalities, feature_dim)
+        self.decoder = LightweightDecoder(feature_dim, num_modalities, target_size=32)
         self.nonparamK = NonParamK(max_K, tau=2.0, tau_min=0.5, tau_anneal_start=15, tau_anneal_factor=0.97)
         self.cluster = ClusterDistribution(feature_dim, max_K)
         self.entropy_loss = EntropyLoss()
@@ -343,17 +380,12 @@ class DeepClusteringModel(nn.Module):
         self.beta = beta
         self.gamma = gamma
 
-        # 【改进】：alpha_inter 目标值，调度通过 get_alpha_inter 控制
         self.alpha_inter_target = 1.0
-        self.alpha_inter = 0.01   # 初始 inter 权重
+        self.alpha_inter = 0.01
 
-        # 【改进】：logits 温度作为可学习参数
-        # 初始值-4.0：sigmoid(-4)=0.018, temp=0.018*20+1≈1.36
-        # 低温让q更尖锐，给π更强的梯度刺激，π能更快追赶真实分布
         self.logits_temp = nn.Parameter(torch.tensor([-4.0]))
 
     def get_alpha_inter(self, epoch, warmup_epochs=10):
-        # 【改进】：使用 sigmoid 平滑预热 alpha_inter，从 epoch 10 开始预热
         if epoch < warmup_epochs:
             t = (epoch - warmup_epochs / 2) / (warmup_epochs / 4)
             alpha = 0.01 + (self.alpha_inter_target - 0.01) * torch.sigmoid(torch.tensor(t, dtype=torch.float32)).item()
@@ -367,72 +399,75 @@ class DeepClusteringModel(nn.Module):
         参数:
             x:             [B, M, H, W, D] 影像张量
             modality_mask: [B, M] 可选，各模态是否有效
-            epoch:         当前epoch，用于两阶段L_ac策略
+            epoch:         当前epoch，控制 warmup / joint 阶段
         """
         z = self.encoder(x, modality_mask)         # [B, feature_dim]
+
+        # ========== 重建 loss（天然保护 feature geometry）==========
+        x_recon = self.decoder(z)                           # [B, 4, 32, 32, 32]
+        x_target = F.adaptive_avg_pool3d(x, self.decoder.target_size)  # 对齐分辨率
+        L_recon = F.mse_loss(x_recon, x_target)
+
+        # ========== 聚类相关 ==========
         pi = self.nonparamK()                      # 带Gumbel噪声的簇权重
 
-        # ---------- 计算可学习版本的 clean_pi ----------
-        # 【修复】：去掉no_grad，让clean_pi参与反向传播，a_k才能被更新
-        # Phase 1（epoch<15）：clean_pi作为固定先验，约束q不要瞎分
-        # Phase 2（epoch>=15）：clean_pi跟随q更新，让π反映真实分配
         clean_v = torch.sigmoid(self.nonparamK.a_k / self.nonparamK.tau)
         remaining_stick = torch.cat([
             torch.ones(1, device=clean_v.device),
             1 - clean_v[:-1]
         ]).cumprod(0)
-        clean_pi = clean_v * remaining_stick  # [K]，参与梯度计算
+        clean_pi = clean_v * remaining_stick       # [K]
 
-        # soft assignment with π_k（z 先centering，防均值漂移让q变尖锐）
-        mu = self.cluster.mu   # [K, feature_dim]
-        z_centered = z - z.mean(dim=0, keepdim=True)
-        dist2 = ((z_centered.unsqueeze(1) - mu.unsqueeze(0)) ** 2).sum(2)
+        mu = self.cluster.mu
+        # 直接用原始 z 算距离（重建 loss 已约束特征流形，无需 centering）
+        # centering 会破坏 mu 的全局坐标系，导致 mu 永远追移动靶子
+        dist2 = ((z.unsqueeze(1) - mu.unsqueeze(0)) ** 2).sum(2)
 
-        # 1. 平滑先验（0.001，避免数值爆炸）
-        clean_pi = clean_pi + 0.001
-        clean_pi = clean_pi / clean_pi.sum()
-
-        # 2. 尖锐的分配（固定temp=1.0，让Q更尖锐）
-        temp = 1.0  # 固定全程
-        # pi_weight 渐进退火：前20轮温和，20-40轮接管，40轮后完全DP
-        if epoch < 20:
-            pi_weight = 0.1
-        elif epoch < 40:
-            pi_weight = 0.5
+        # ==========================================
+        # 时间轴 1：pi 权重退火 (与聚类介入同步)
+        # ==========================================
+        if epoch < 30:
+            pi_weight = 0.1   # 纯 AE 期：压制先验
+        elif epoch < 60:
+            pi_weight = 0.5   # 轻微聚类期：先验半开
         else:
-            pi_weight = 1.0
+            pi_weight = 1.0   # 完全体：先验全开
 
-        # 放大距离差异
-        logits = (-5.0 * dist2 + pi_weight * torch.log(clean_pi + 1e-8)) / temp
+        clean_pi_norm = (clean_pi + 0.001) / (clean_pi + 0.001).sum()
+        logits = (-5.0 * dist2 + pi_weight * torch.log(clean_pi_norm + 1e-8))
         q = F.softmax(logits, dim=1)
 
-        # losses
+        # 聚类 loss
         L_intra = self.cluster.intra_loss(z, q, mu)
         L_inter = self.cluster.inter_loss()
 
-        # 3. 两阶段EM逻辑（与pi_weight退火同步）
-        if epoch < 20:
-            L_ac = self.anticollapse(q, clean_pi.detach())   # 固定π，训练q
+        # ==========================================
+        # 时间轴 2：EM 两阶段逻辑 (必须在 30 轮切换！)
+        # ==========================================
+        if epoch < 30:
+            # 聚类未介入，q 是随机的，必须固定 pi 约束 q
+            L_ac = self.anticollapse(q, clean_pi.detach())
         else:
-            L_ac = self.anticollapse(q.detach(), clean_pi)   # 固定q，训练π
+            # 聚类开始介入，固定 q，让 pi 追随真实分布
+            L_ac = self.anticollapse(q.detach(), clean_pi)
 
+        # VICReg / Var 只用于 TensorBoard 监控，不参与 loss
         L_var = self.varloss(z)
         L_vicreg = self.vicreg(z)
-        L_entropy = self.entropy_loss(q)
 
-        # 4. 课程式熵约束
+        # ==========================================
+        # 时间轴 3：最终 Loss 渐进式 Schedule
+        # ==========================================
+        L_cluster_pack = 1.0 * L_intra + 0.1 * L_inter + self.beta * L_ac
+
         if epoch < 30:
-            entropy_weight = 0.01
+            # 阶段 1 (0~29)：纯 AE 预训练
+            L_total = L_recon
+        elif epoch < 60:
+            # 阶段 2 (30~59)：轻微聚类 (0.01)
+            L_total = L_recon + 0.01 * L_cluster_pack
         else:
-            entropy_weight = 0.005
-
-        # 5. 终极 Loss
-        # 【P1】L_intra 1.0→0.1：降低cluster pressure，保护feature geometry
-        # 【P2】VICReg 1.0→5.0：适度加强防塌缩，不暴力破坏聚类结构
-        # 【P3】epoch<20 warmup：仅 encoder+VICReg，聚类head在表示形成后再介入
-        if epoch < 20:
-            L_total = 5.0 * L_vicreg
-        else:
-            L_total = 0.1 * L_intra + 0.1 * L_inter + self.beta * L_ac - entropy_weight * L_entropy + 5.0 * L_vicreg
+            # 阶段 3 (60+)：适度加强聚类 (0.05)
+            L_total = L_recon + 0.05 * L_cluster_pack
 
         return z, q, clean_pi, L_total, L_intra, L_inter, L_ac, L_var, L_vicreg
