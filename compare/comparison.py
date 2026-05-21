@@ -267,7 +267,7 @@ def run_comparison(
     labels_dec = run_dec(z_simclr, n_clusters, epochs=30)
     labels_idec = run_idec_var(z_simclr, n_clusters, epochs=30, var_weight=0.1)
     labels_kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10).fit_predict(z_simclr)
-    labels_gmm = GaussianMixture(n_components=n_clusters, random_state=42, covariance_type="full", n_init=5).fit_predict(z_simclr)
+    labels_gmm = GaussianMixture(n_components=n_clusters, random_state=42, covariance_type="diag", n_init=5, reg_covar=1e-3).fit_predict(z_simclr)
     labels_simclr_km = KMeans(n_clusters=n_clusters, random_state=42, n_init=10).fit_predict(z_simclr)
 
     all_labels = {
@@ -422,7 +422,7 @@ def run_comparison(
             elif name == "KMeans":
                 labels_boot = KMeans(n_clusters=n_clusters, random_state=42, n_init=10).fit_predict(z_boot)
             elif name == "GMM":
-                labels_boot = GaussianMixture(n_components=n_clusters, random_state=42, covariance_type="full", n_init=5).fit_predict(z_boot)
+                labels_boot = GaussianMixture(n_components=n_clusters, random_state=42, covariance_type="diag", n_init=5, reg_covar=1e-3).fit_predict(z_boot)
             elif name == "DEC":
                 labels_boot = run_dec(z_boot, n_clusters, epochs=30)
             elif name == "IDEC-Var":
