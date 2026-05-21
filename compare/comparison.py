@@ -254,7 +254,7 @@ def run_comparison(
     # --- 输出目录 ---
     exp_name = os.path.basename(os.path.dirname(checkpoint_path))
     if output_dir is None:
-        output_dir = os.path.join("Graduation", "compare_results", exp_name, "full_comparison")
+        output_dir = os.path.join("compare_results", exp_name, "full_comparison")
     os.makedirs(output_dir, exist_ok=True)
 
     # --- 加载数据 & 模型 ---

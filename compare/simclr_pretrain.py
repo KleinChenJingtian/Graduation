@@ -149,7 +149,7 @@ def train_simclr(data_dir="data",
 
     if output_dir is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_dir = os.path.join("Graduation", "experiments", f"simclr_{timestamp}")
+        output_dir = os.path.join("experiments", f"simclr_{timestamp}")
     os.makedirs(output_dir, exist_ok=True)
 
     # 加载数据

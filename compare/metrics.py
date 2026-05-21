@@ -101,7 +101,7 @@ def compare_methods(z_all, your_labels, n_clusters):
     # 保存结果到 compare_results/时间戳/ 目录
     from datetime import datetime
     exp_name = datetime.now().strftime("%Y%m%d_%H%M%S")
-    save_dir = os.path.join("Graduation", "compare_results", exp_name)
+    save_dir = os.path.join("compare_results", exp_name)
     os.makedirs(save_dir, exist_ok=True)
 
     report_path = os.path.join(save_dir, "comparison.json")

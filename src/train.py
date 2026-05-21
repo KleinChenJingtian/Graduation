@@ -215,7 +215,7 @@ def train(
     scaler = GradScaler('cuda')
 
     # 【新增】：诊断目录（每个exp独立）
-    diag_base_dir = os.path.join("Graduation", "diagnostics", os.path.basename(exp_dir))
+    diag_base_dir = os.path.join("diagnostics", os.path.basename(exp_dir))
     os.makedirs(diag_base_dir, exist_ok=True)
 
     # ============================================================

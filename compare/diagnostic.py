@@ -184,7 +184,7 @@ if __name__ == "__main__":
     # 格式：experiments/20260509_171534/checkpoint.pth → 20260509_171534
     checkpoint_dir = os.path.dirname(checkpoint_path)  # .../experiments/20260509_171534
     exp_name = os.path.basename(checkpoint_dir)        # 20260509_171534
-    output_dir = os.path.join("Graduation", "compare_results", exp_name)
+    output_dir = os.path.join("compare_results", exp_name)
     os.makedirs(output_dir, exist_ok=True)
 
     print(f"输出目录: {output_dir}")

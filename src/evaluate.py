@@ -534,7 +534,7 @@ if __name__ == "__main__":
         checkpoint_dir = os.path.dirname(args.checkpoint)  # experiments/20260417_170547
         exp_name = os.path.basename(checkpoint_dir)       # 20260417_170547
         # 直接用 evaluation_results（相对于当前工作目录）
-        args.output_dir = os.path.join("Graduation", "evaluation_results", exp_name)
+        args.output_dir = os.path.join("evaluation_results", exp_name)
 
     os.makedirs(args.output_dir, exist_ok=True)
     print(f"[INFO] 评估结果将保存至: {args.output_dir}")
