@@ -667,25 +667,3 @@ if __name__ == "__main__":
         n_bootstrap=args.n_bootstrap,
         k_neighbors=args.k_knn,
     )
-r", type=str, default=None,
-                        help="输出目录")
-    parser.add_argument("--K", type=int, default=None,
-                        help="强制指定聚类数（默认从模型自动推断）")
-    parser.add_argument("--n_bootstrap", type=int, default=5,
-                        help="Bootstrap 轮数")
-    parser.add_argument("--k_knn", type=int, default=10,
-                        help="kNN 一致性的 k 值")
-
-    args = parser.parse_args()
-
-    run_comparison(
-        checkpoint_path=args.checkpoint,
-        data_dir=args.data_dir,
-        clinical_path=args.clinical,
-        simclr_checkpoint=args.simclr_checkpoint,
-        simclr_cluster_ckpt=args.simclr_cluster_ckpt,
-        output_dir=args.output_dir,
-        n_clusters=args.K,
-        n_bootstrap=args.n_bootstrap,
-        k_neighbors=args.k_knn,
-    )
