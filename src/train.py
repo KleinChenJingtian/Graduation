@@ -162,7 +162,8 @@ def train(
         batch_size = batch_size,
         shuffle = True,
         num_workers = 2,  # 使用 2 个子进程来加载数据，可以加快数据预处理的速度，特别是当数据集较大时。
-        pin_memory = True # 这个参数告诉 DataLoader 在将数据加载到 GPU 之前，先把数据放到锁页内存中。这样可以加速数据从 CPU 到 GPU 的传输，尤其是在使用 CUDA 时。
+        pin_memory = True, # 这个参数告诉 DataLoader 在将数据加载到 GPU 之前，先把数据放到锁页内存中。这样可以加速数据从 CPU 到 GPU 的传输，尤其是在使用 CUDA 时。
+        drop_last = True,  # 丢弃最后不完整的batch，避免VICReg在单样本上崩掉
     )
 
     # ============================================================

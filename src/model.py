@@ -309,7 +309,8 @@ class VICRegLoss(nn.Module):
     def forward(self, z):
         B = z.shape[0]
         if B < 2:
-            return torch.tensor(0.0, device=z.device)
+            # 保持与 z 的梯度连接，避免 "does not require grad" 错误
+            return (0.0 * z).sum()
 
         # 1. 方差约束：每维 std > 1.0
         std_z = torch.sqrt(z.var(dim=0) + 1e-4)
