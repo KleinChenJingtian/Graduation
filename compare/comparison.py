@@ -64,7 +64,7 @@ import matplotlib.pyplot as plt
 from scipy.optimize import linear_sum_assignment
 
 from src.dataset import GBMDataset
-from src.model import DeepClusteringModel, MultiViewEncoder
+from src.model import DeepClusteringModel, MultiViewEncoder, ClusteringHead
 
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -242,6 +242,7 @@ def run_comparison(
     data_dir="data",
     clinical_path=None,
     simclr_checkpoint=None,
+    simclr_cluster_ckpt=None,
     output_dir=None,
     n_clusters=None,
     n_bootstrap=5,
@@ -337,13 +338,31 @@ def run_comparison(
         "GMM": labels_gmm,
     }
 
-    # SimCLR 特征上的 K-Means
+    # SimCLR 特征上的 K-Means & 聚类头
     simclr_added = False
     if z_simclr is not None:
         labels_simclr = KMeans(n_clusters=n_clusters, random_state=42, n_init=10).fit_predict(z_simclr)
         all_labels["SimCLR+KMeans"] = labels_simclr
         simclr_added = True
         print("  SimCLR+KMeans: 已添加")
+
+    # SimCLR+ClusteringHead（二阶段方案）
+    cluster_head = None  # 后续 bootstrap 等需要判断是否可用
+    if simclr_cluster_ckpt and os.path.exists(simclr_cluster_ckpt) and z_simclr is not None:
+        cluster_head = ClusteringHead(feature_dim=256, max_K=10).to(DEVICE)
+        ckpt_cl = torch.load(simclr_cluster_ckpt, map_location=DEVICE, weights_only=False)
+        cluster_head.load_state_dict(ckpt_cl["model_state"])
+        cluster_head.eval()
+        with torch.no_grad():
+            z_tensor = torch.tensor(z_simclr, dtype=torch.float32, device=DEVICE)
+            q_simclr_cl, clean_pi_cl, *_ = cluster_head(z_tensor, epoch=999)
+            labels_simclr_cl = q_simclr_cl.argmax(dim=1).cpu().numpy()
+        all_labels["SimCLR+Cluster"] = labels_simclr_cl
+        simclr_cluster_epoch = ckpt_cl.get("epoch", "?")
+        simclr_added = True
+        print(f"  SimCLR+Cluster: 已添加 (epoch {simclr_cluster_epoch})")
+    elif simclr_cluster_ckpt:
+        print(f"[WARNING] SimCLR+Cluster 需要 --simclr_checkpoint 和 --simclr_cluster_ckpt 同时提供，跳过")
 
     for name, labels in all_labels.items():
         unique, counts = np.unique(labels, return_counts=True)
@@ -357,7 +376,7 @@ def run_comparison(
 
     internal_results = {}
     for name, labels in all_labels.items():
-        z_ref = z_simclr if (name == "SimCLR+KMeans" and z_simclr is not None) else z_all
+        z_ref = z_simclr if (z_simclr is not None and name.startswith("SimCLR")) else z_all
         try:
             sil = silhouette_score(z_ref, labels)
             dbi = davies_bouldin_score(z_ref, labels)
@@ -407,7 +426,7 @@ def run_comparison(
         entropy_norm = cluster_entropy(counts)
 
         # 特征空间方差：使用该方法聚类所在的特征空间
-        z_collapse = z_simclr if (name == "SimCLR+KMeans" and z_simclr is not None) else z_all
+        z_collapse = z_simclr if (z_simclr is not None and name.startswith("SimCLR")) else z_all
 
         within_cluster_vars = []
         for c in unique:
@@ -498,11 +517,11 @@ def run_comparison(
     print(f"  YourMethod: NMI={np.mean(your_nmi_list):.4f}±{np.std(your_nmi_list):.4f}, "
           f"ARI={np.mean(your_ari_list):.4f}±{np.std(your_ari_list):.4f}")
 
-    # --- DEC / IDEC-Var / KMeans / GMM / SimCLR+KMeans：纯特征空间重聚 ---
+    # --- DEC / IDEC-Var / KMeans / GMM / SimCLR+KMeans / SimCLR+Cluster：纯特征空间重聚 ---
     other_methods = [name for name in all_labels.keys() if name != "YourMethod"]
     for name in other_methods:
-        # SimCLR+KMeans 使用 SimCLR 特征空间
-        z_ref = z_simclr if (name == "SimCLR+KMeans" and z_simclr is not None) else z_all
+        # SimCLR 系列使用 SimCLR 特征空间
+        z_ref = z_simclr if (z_simclr is not None and name.startswith("SimCLR")) else z_all
 
         nmi_list, ari_list = [], []
         for idx in boot_indices:
@@ -511,7 +530,13 @@ def run_comparison(
                 labels_boot = run_dec(z_boot, n_clusters, epochs=30)
             elif name == "IDEC-Var":
                 labels_boot = run_idec_var(z_boot, n_clusters, epochs=30, var_weight=0.1)
-            elif name == "KMeans" or name == "SimCLR+KMeans":
+            elif name == "SimCLR+Cluster" and cluster_head is not None:
+                # 用聚类头在 bootstrap 特征上推理
+                with torch.no_grad():
+                    z_t = torch.tensor(z_boot, dtype=torch.float32, device=DEVICE)
+                    q_boot, *_ = cluster_head(z_t, epoch=999)
+                    labels_boot = q_boot.argmax(dim=1).cpu().numpy()
+            elif name in ("KMeans", "SimCLR+KMeans"):
                 labels_boot = KMeans(n_clusters=n_clusters, random_state=42, n_init=10).fit_predict(z_boot)
             else:  # GMM
                 labels_boot = GaussianMixture(n_components=n_clusters, random_state=42, covariance_type="full", n_init=5).fit_predict(z_boot)
@@ -534,8 +559,8 @@ def run_comparison(
 
     knn_results = {}
     for name, labels in all_labels.items():
-        # SimCLR+KMeans 的聚类在 SimCLR 特征空间
-        z_knn = z_simclr if (name == "SimCLR+KMeans" and z_simclr is not None) else z_all
+        # SimCLR 系列方法使用 SimCLR 特征空间
+        z_knn = z_simclr if (z_simclr is not None and name.startswith("SimCLR")) else z_all
         try:
             consistency = compute_knn_consistency(z_knn, labels, k=k_neighbors)
             knn_results[name] = {"kNN_consistency": float(consistency)}
@@ -602,8 +627,8 @@ def run_comparison(
         axes = [axes]
 
     for ax, (name, labels) in zip(axes, all_labels.items()):
-        # SimCLR+KMeans 使用自己的特征空间
-        if name == "SimCLR+KMeans" and z_simclr_2d is not None:
+        # SimCLR 系列方法使用自己的特征空间
+        if name.startswith("SimCLR") and z_simclr_2d is not None:
             coords = z_simclr_2d
         else:
             coords = z_2d
@@ -747,6 +772,8 @@ if __name__ == "__main__":
                         help="YourMethod 模型权重路径")
     parser.add_argument("--simclr_checkpoint", type=str, default=None,
                         help="SimCLR 预训练编码器路径（可选，添加 SimCLR+KMeans baseline）")
+    parser.add_argument("--simclr_cluster_ckpt", type=str, default=None,
+                        help="SimCLR+聚类头 checkpoint 路径（可选，添加 SimCLR+Cluster 二阶段方法）")
     parser.add_argument("--data_dir", type=str, default="data",
                         help="数据目录")
     parser.add_argument("--clinical", type=str, default=None,
@@ -767,6 +794,7 @@ if __name__ == "__main__":
         data_dir=args.data_dir,
         clinical_path=args.clinical,
         simclr_checkpoint=args.simclr_checkpoint,
+        simclr_cluster_ckpt=args.simclr_cluster_ckpt,
         output_dir=args.output_dir,
         n_clusters=args.K,
         n_bootstrap=args.n_bootstrap,

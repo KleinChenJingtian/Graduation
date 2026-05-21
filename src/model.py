@@ -4,6 +4,23 @@ import torch.nn.functional as F
 import math
 
 
+#   # 阶段1：SimCLR 对比预训练
+#   python -m compare.simclr_pretrain --epochs 100 --batch_size 4
+
+#   # 阶段2：聚类头训练（Encoder 冻结）
+#   python -m compare.simclr_clustering \
+#       --simclr_ckpt experiments/simclr_20260521_xxx/checkpoint.pth \
+#       --epochs 100 \
+#       --lr 1e-3
+
+#   # 评估对比（同时比较三种方案）
+#   python -m compare.comparison \
+#       --checkpoint experiments/yourmodel_xxx/checkpoint.pth \
+#       --simclr_checkpoint experiments/simclr_xxx/checkpoint.pth \
+#       --simclr_cluster_ckpt experiments/simclr_xxx_cluster_xxx/cluster_final.pth \
+#       --clinical clinical_eval.csv
+
+
 # ============================================================
 # 多视图 Encoder（轻量级 Transformer Cross-Attention 版）
 # ============================================================
@@ -436,3 +453,90 @@ class DeepClusteringModel(nn.Module):
             L_total = 0.1 * L_intra + 0.1 * L_inter + self.beta * L_ac - entropy_weight * L_entropy + 5.0 * L_vicreg
 
         return z, q, clean_pi, L_total, L_intra, L_inter, L_ac, L_var, L_vicreg
+
+
+# ============================================================
+# 聚类头（仅聚类，无Encoder）— 用于SimCLR二阶段方案
+# ============================================================
+
+class ClusteringHead(nn.Module):
+    """
+    只包含聚类模块（NonParamK + ClusterDistribution + AntiCollapseLoss），
+    接受已提取好的特征 z [B, feature_dim]，做软分配和簇参数学习。
+
+    用于 SimCLR 二阶段方案：
+    - 阶段1：SimCLR 对比预训练 → 冻结 Encoder
+    - 阶段2：ClusteringHead 在冻结特征上训练聚类（仅更新 a_k, mu, log_sigma）
+    """
+    def __init__(self, feature_dim=256, max_K=10, beta=1.0):
+        super().__init__()
+        self.feature_dim = feature_dim
+        self.max_K = max_K
+        self.beta = beta
+
+        self.nonparamK = NonParamK(max_K, tau=2.0, tau_min=0.5,
+                                   tau_anneal_start=15, tau_anneal_factor=0.97)
+        self.cluster = ClusterDistribution(feature_dim, max_K)
+        self.anticollapse = AntiCollapseLoss()
+        self.entropy_loss = EntropyLoss()
+
+    def forward(self, z, epoch=0):
+        """
+        参数:
+            z:     [B, feature_dim] 冻结Encoder提取的特征
+            epoch: 当前epoch，控制EM阶段切换和π权重退火
+        返回:
+            q, clean_pi, L_total, L_intra, L_inter, L_ac, L_entropy
+        """
+        pi = self.nonparamK()  # 带Gumbel噪声
+
+        # clean_pi（无噪声，参与梯度）
+        clean_v = torch.sigmoid(self.nonparamK.a_k / self.nonparamK.tau)
+        remaining_stick = torch.cat([
+            torch.ones(1, device=clean_v.device),
+            1 - clean_v[:-1]
+        ]).cumprod(0)
+        clean_pi = clean_v * remaining_stick  # [K]
+
+        # 软分配（centering防均值漂移）
+        mu = self.cluster.mu
+        z_centered = z - z.mean(dim=0, keepdim=True)
+        dist2 = ((z_centered.unsqueeze(1) - mu.unsqueeze(0)) ** 2).sum(2)
+
+        # π先验平滑
+        clean_pi_smooth = clean_pi + 0.001
+        clean_pi_smooth = clean_pi_smooth / clean_pi_smooth.sum()
+
+        # π权重渐进退火
+        if epoch < 20:
+            pi_weight = 0.1
+        elif epoch < 40:
+            pi_weight = 0.5
+        else:
+            pi_weight = 1.0
+
+        logits = -5.0 * dist2 + pi_weight * torch.log(clean_pi_smooth + 1e-8)
+        q = F.softmax(logits, dim=1)
+
+        # 核心损失
+        L_intra = self.cluster.intra_loss(z, q, mu)
+        L_inter = self.cluster.inter_loss()
+
+        # EM两阶段策略
+        if epoch < 20:
+            L_ac = self.anticollapse(q, clean_pi.detach())   # 固定π，训练q分布
+        else:
+            L_ac = self.anticollapse(q.detach(), clean_pi)   # 固定q，训练π
+
+        L_entropy = self.entropy_loss(q)
+
+        # 损失组装
+        entropy_weight = 0.01 if epoch < 30 else 0.005
+
+        if epoch < 20:
+            # Phase 1: 只做簇内凝聚 + 轻微反塌缩
+            L_total = L_intra + 0.1 * L_ac
+        else:
+            L_total = L_intra + 0.1 * L_inter + self.beta * L_ac - entropy_weight * L_entropy
+
+        return q, clean_pi, L_total, L_intra, L_inter, L_ac, L_entropy
