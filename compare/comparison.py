@@ -1,55 +1,49 @@
 # compare/comparison.py
-# 全方位聚类方法对比：YourMethod / DEC / IDEC-Var / K-Means / GMM
+# 聚类方法对比（SimCLR + 聚类头 二阶段方案）
+# 对比：Ours / DEC / IDEC-Var / K-Means / GMM / SimCLR+KMeans
 # 输出：内部指标 + Bootstrap稳定性 + kNN一致性 + π分布 + UMAP可视化 + KM曲线
 #
 # ============================================================
-# 运行方式（在项目根目录 D:\codeC\VsCodeP 下执行）
+# 完整流程（在项目根目录下执行）
 # ============================================================
 #
-# ---- 第一步：生成临床数据（只需执行一次）----
+# ---- 第〇步：生成临床数据（只需执行一次）----
 #   python match_clinical.py
-#   输出：clinical_eval.csv（评估专用，313 行 × 7 列）
 #
-# ---- 第二步：设置环境变量 ----
+# ---- 第一步：SimCLR 对比预训练（阶段1）----
 #   $env:PYTHONPATH="."
+#   python -m compare.simclr_pretrain --epochs 100 --batch_size 4
 #
-# ---- 第三步：运行对比实验 ----
-# （1）仅聚类对比（无临床数据）：
-#   python -m compare.comparison `
-#       --checkpoint experiments/20260509_223937/checkpoint.pth
+# ---- 第二步：聚类头训练（阶段2）----
+#   python -m compare.simclr_clustering `
+#       --simclr_ckpt experiments/simclr_xxx/checkpoint.pth `
+#       --epochs 100 --lr 1e-3
 #
-# （2）聚类对比 + 生存分析：
+# ---- 第三步：全方法对比评估 ----
+#   （1）仅聚类对比（无临床数据）：
 #   python -m compare.comparison `
-#       --checkpoint experiments/20260509_223937/checkpoint.pth `
-#       --clinical clinical_eval.csv
-#
-# （3）含 SimCLR baseline（需先运行 simclr_pretrain.py）：
-#   python -m compare.comparison `
-#       --checkpoint experiments/20260509_223937/checkpoint.pth `
 #       --simclr_checkpoint experiments/simclr_xxx/checkpoint.pth `
-#       --clinical clinical_eval.csv
+#       --simclr_cluster_ckpt experiments/simclr_xxx_cluster_20260521_xxx/cluster_final.pth
 #
-#   参数说明：
-#     --checkpoint         YourMethod 模型权重路径（必填）
-#     --clinical           临床数据 CSV（可选，提供则做 KM 生存分析）
-#     --simclr_checkpoint  SimCLR 预训练编码器路径（可选）
-#     --data_dir           MRI 数据目录（默认 data）
-#     --K                  强制指定聚类数（默认从模型自动推断）
-#     --n_bootstrap        Bootstrap 轮数（默认 5）
+#   （2）聚类对比 + 生存分析：
+#   python -m compare.comparison `
+#       --simclr_checkpoint experiments/simclr_xxx/checkpoint.pth `
+#       --simclr_cluster_ckpt experiments/simclr_xxx_cluster_20260521_xxx/cluster_final.pth `
+#       --clinical clinical_eval.csv
 #
 # ---- 评估输出（保存在 compare_results/<实验名>/full_comparison/ 下）----
 #   comparison_report.json        完整对比报告
 #   umap_comparison.png           UMAP 可视化（所有方法并列）
 #   cluster_size_distribution.png 簇分布对比柱状图
 #   feature_variance_boxplot.png  特征空间方差箱线图
-#   pi_vs_q_bar.png              π vs q̄ 分布对比
+#   pi_vs_q_bar.png              π vs q̄ 分布
 #   km_<Method>.png              各方法的 KM 生存曲线
 
 import os
 import json
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader
 from sklearn.cluster import KMeans
 from sklearn.mixture import GaussianMixture
 from sklearn.metrics import (
@@ -64,7 +58,7 @@ import matplotlib.pyplot as plt
 from scipy.optimize import linear_sum_assignment
 
 from src.dataset import GBMDataset
-from src.model import DeepClusteringModel, MultiViewEncoder, ClusteringHead
+from src.model import MultiViewEncoder, ClusteringHead
 
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -78,7 +72,6 @@ def align_labels(labels_ref, labels_boot):
     """
     将 labels_boot 对齐到 labels_ref（标签可能相差一个 permutation）
     使用 Hungarian algorithm 最优匹配。
-    当 bootstrap 簇数少于 ref 时，未匹配的簇保留原标签。
     """
     classes_ref = np.unique(labels_ref)
     classes_boot = np.unique(labels_boot)
@@ -156,7 +149,6 @@ def run_idec_var(z_all, n_clusters, epochs=30, alpha=1.0, lr=0.01, var_weight=0.
     IDEC 方差保留变体：
     - 在 DEC 优化目标中加入特征空间方差损失
     - 适配无解码器架构（用 L_var 替代解码器重构损失）
-    - 论文中称为 "IDEC (Variance-Preserved Variant)"
     """
     z_tensor = torch.tensor(z_all, dtype=torch.float32, device=device)
     kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
@@ -173,7 +165,7 @@ def run_idec_var(z_all, n_clusters, epochs=30, alpha=1.0, lr=0.01, var_weight=0.
             p = q ** 2 / torch.sum(q, dim=0, keepdim=True)
             p = p / torch.sum(p, dim=1, keepdim=True)
         loss_kl = torch.mean(torch.sum(p * torch.log(p / (q + 1e-10)), dim=1))
-        # 方差保留项：特征在每个维度上的方差不能过小（避免坍缩）
+        # 方差保留项
         var_loss = torch.mean(torch.var(z_tensor, dim=0))
         loss = loss_kl + var_weight * var_loss
         loss.backward()
@@ -187,62 +179,15 @@ def run_idec_var(z_all, n_clusters, epochs=30, alpha=1.0, lr=0.01, var_weight=0.
     return labels
 
 
-def run_yourmethod_on_subset(dataset, idx, checkpoint_state, n_clusters, device):
-    """
-    YourMethod 在数据子集上重新推理：
-    加载模型 → 只在指定样本上 forward → 返回硬标签
-    """
-    boot_dataset = Subset(dataset, idx)
-    boot_loader = DataLoader(boot_dataset, batch_size=4, shuffle=False)
-
-    model_boot = DeepClusteringModel(num_modalities=4, feature_dim=256, max_K=10).to(device)
-    model_boot.load_state_dict(checkpoint_state, strict=False)
-    model_boot.eval()
-
-    z_list = []
-    with torch.no_grad():
-        for x, mask, modality_mask, pids in boot_loader:
-            x = x.to(device)
-            modality_mask = modality_mask.to(device)
-            z, q, _, *_ = model_boot(x, modality_mask, epoch=999)
-            z_list.append(z.cpu().numpy())
-
-    z_boot_full = np.concatenate(z_list, axis=0)
-    # 精化：用 DEC 风格在 bootstrap 特征上做最终聚类
-    km_boot = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-    km_boot.fit(z_boot_full)
-    centers_boot = torch.tensor(km_boot.cluster_centers_, dtype=torch.float32, device=device, requires_grad=True)
-    z_t = torch.tensor(z_boot_full, dtype=torch.float32, device=device)
-    opt = torch.optim.Adam([centers_boot], lr=0.01)
-    for _ in range(30):
-        opt.zero_grad()
-        d2 = torch.sum((z_t.unsqueeze(1) - centers_boot.unsqueeze(0)) ** 2, dim=2)
-        qb = (1.0 + d2) ** (-1.0)
-        qb = qb / torch.sum(qb, dim=1, keepdim=True)
-        with torch.no_grad():
-            pb = qb ** 2 / torch.sum(qb, dim=0, keepdim=True)
-            pb = pb / torch.sum(pb, dim=1, keepdim=True)
-        lo = torch.mean(torch.sum(pb * torch.log(pb / (qb + 1e-10)), dim=1))
-        lo.backward()
-        opt.step()
-    with torch.no_grad():
-        d2 = torch.sum((z_t.unsqueeze(1) - centers_boot.unsqueeze(0)) ** 2, dim=2)
-        qb = (1.0 + d2) ** (-1.0)
-        qb = qb / torch.sum(qb, dim=1, keepdim=True)
-        labels_boot = qb.argmax(dim=1).cpu().numpy()
-    return labels_boot
-
-
 # ============================================================
 # 主函数
 # ============================================================
 
 def run_comparison(
-    checkpoint_path,
+    simclr_checkpoint,
+    simclr_cluster_ckpt,
     data_dir="data",
     clinical_path=None,
-    simclr_checkpoint=None,
-    simclr_cluster_ckpt=None,
     output_dir=None,
     n_clusters=None,
     n_bootstrap=5,
@@ -250,119 +195,89 @@ def run_comparison(
     k_neighbors=10,
     random_seed=42
 ):
+    """
+    SimCLR 二阶段方案对比：Ours (Two-Stage) vs DEC / IDEC / KMeans / GMM / SimCLR+KMeans
+    所有方法统一使用 SimCLR 特征空间 z_simclr。
+    """
     np.random.seed(random_seed)
 
     # --- 输出目录 ---
-    exp_name = os.path.basename(os.path.dirname(checkpoint_path))
+    exp_name = os.path.basename(os.path.dirname(simclr_cluster_ckpt))
     if output_dir is None:
         output_dir = os.path.join("compare_results", exp_name, "full_comparison")
     os.makedirs(output_dir, exist_ok=True)
 
-    # --- 加载数据 & 模型 ---
+    # --- 加载数据 ---
     print("=" * 60)
-    print("加载数据 & 模型...")
+    print("加载数据...")
     dataset = GBMDataset(data_dir)
     loader = DataLoader(dataset, batch_size=4, shuffle=False)
 
-    model = DeepClusteringModel(num_modalities=4, feature_dim=256, max_K=10).to(DEVICE)
-    checkpoint = torch.load(checkpoint_path, map_location=DEVICE, weights_only=False)
-    model.load_state_dict(checkpoint["model_state"])
-    model.eval()
-    model_epoch = checkpoint.get("epoch", "?")
-    checkpoint_state = checkpoint["model_state"]
-    print(f"[OK] 模型加载完成: epoch {model_epoch}")
+    # --- 加载 SimCLR Encoder（冻结）---
+    print("\n加载 SimCLR 预训练编码器...")
+    simclr_encoder = MultiViewEncoder(num_modalities=4, feature_dim=256).to(DEVICE)
+    simclr_ckpt = torch.load(simclr_checkpoint, map_location=DEVICE, weights_only=False)
+    simclr_encoder.load_state_dict(simclr_ckpt["encoder_state"])
+    simclr_encoder.eval()
+    print(f"[OK] SimCLR 编码器加载完成: epoch {simclr_ckpt.get('epoch', '?')}")
 
-    # --- 提取特征 ---
-    print("提取特征...")
-    z_list, q_list, pid_list = [], [], []
+    # --- 加载 ClusteringHead ---
+    print("\n加载聚类头...")
+    cluster_head = ClusteringHead(feature_dim=256, max_K=10).to(DEVICE)
+    ckpt_cl = torch.load(simclr_cluster_ckpt, map_location=DEVICE, weights_only=False)
+    cluster_head.load_state_dict(ckpt_cl["model_state"])
+    cluster_head.eval()
+    cluster_epoch = ckpt_cl.get("epoch", "?")
+    print(f"[OK] 聚类头加载完成: epoch {cluster_epoch}")
 
+    # --- 提取 SimCLR 特征 ---
+    print("\n提取 SimCLR 特征...")
+    z_list, pid_list = [], []
     with torch.no_grad():
         for x, mask, modality_mask, pids in loader:
             x = x.to(DEVICE)
             modality_mask = modality_mask.to(DEVICE)
-            z, q, clean_pi, *_ = model(x, modality_mask, epoch=999)
+            z = simclr_encoder(x, modality_mask)
             z_list.append(z.cpu().numpy())
-            q_list.append(q.cpu().numpy())
             pid_list.extend(pids)
+    z_simclr = np.concatenate(z_list, axis=0)
+    print(f"[OK] SimCLR 特征提取完成: {z_simclr.shape}")
 
-    z_all = np.concatenate(z_list, axis=0)
-    q_all = np.concatenate(q_list, axis=0)
-    your_labels = q_all.argmax(axis=1)
-    clean_pi = clean_pi.cpu().numpy()
-    print(f"[OK] 提取了 {len(z_all)} 个患者的特征")
-
-    # --- SimCLR 特征提取（可选） ---
-    z_simclr = None
-    if simclr_checkpoint and os.path.exists(simclr_checkpoint):
-        print("\n加载 SimCLR 预训练编码器...")
-        simclr_encoder = MultiViewEncoder(num_modalities=4, feature_dim=256).to(DEVICE)
-        simclr_ckpt = torch.load(simclr_checkpoint, map_location=DEVICE, weights_only=False)
-        simclr_encoder.load_state_dict(simclr_ckpt["encoder_state"])
-        simclr_encoder.eval()
-        print(f"[OK] SimCLR 编码器加载完成: epoch {simclr_ckpt.get('epoch', '?')}")
-
-        z_simclr_list = []
-        with torch.no_grad():
-            for x, mask, modality_mask, pids in loader:
-                x = x.to(DEVICE)
-                modality_mask = modality_mask.to(DEVICE)
-                z_s = simclr_encoder(x, modality_mask)
-                z_simclr_list.append(z_s.cpu().numpy())
-        z_simclr = np.concatenate(z_simclr_list, axis=0)
-        print(f"[OK] SimCLR 特征提取完成: {z_simclr.shape}")
-    elif simclr_checkpoint:
-        print(f"[WARNING] SimCLR checkpoint 不存在: {simclr_checkpoint}，跳过")
+    # --- Ours：用聚类头推理 ---
+    print("\n推理 Ours (Two-Stage)...")
+    with torch.no_grad():
+        z_tensor = torch.tensor(z_simclr, dtype=torch.float32, device=DEVICE)
+        q_ours, clean_pi, *_ = cluster_head(z_tensor, epoch=999)
+        labels_ours = q_ours.argmax(dim=1).cpu().numpy()
+        q_mean_ours = q_ours.cpu().numpy().mean(axis=0)
+        clean_pi = clean_pi.cpu().numpy()
+    print(f"[OK] Ours: {len(np.unique(labels_ours))} 个簇")
 
     # --- 确定聚类数 ---
     if n_clusters is None:
-        n_clusters = len(np.unique(your_labels))
+        n_clusters = len(np.unique(labels_ours))
     print(f"使用簇数 K={n_clusters}")
 
     # ============================================================
-    # 1. 各方法硬标签
+    # 1. 各方法硬标签（统一使用 z_simclr 特征空间）
     # ============================================================
     print("\n" + "=" * 60)
     print("各方法聚类...")
 
-    labels_your = your_labels.copy()
-    labels_dec = run_dec(z_all, n_clusters, epochs=30)
-    labels_idec = run_idec_var(z_all, n_clusters, epochs=30, var_weight=0.1)
-    labels_kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10).fit_predict(z_all)
-    labels_gmm = GaussianMixture(n_components=n_clusters, random_state=42, covariance_type="full", n_init=5).fit_predict(z_all)
+    labels_dec = run_dec(z_simclr, n_clusters, epochs=30)
+    labels_idec = run_idec_var(z_simclr, n_clusters, epochs=30, var_weight=0.1)
+    labels_kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10).fit_predict(z_simclr)
+    labels_gmm = GaussianMixture(n_components=n_clusters, random_state=42, covariance_type="full", n_init=5).fit_predict(z_simclr)
+    labels_simclr_km = KMeans(n_clusters=n_clusters, random_state=42, n_init=10).fit_predict(z_simclr)
 
     all_labels = {
-        "YourMethod": labels_your,
-        "DEC": labels_dec,
-        "IDEC-Var": labels_idec,
+        "Ours": labels_ours,
+        "SimCLR+KMeans": labels_simclr_km,
         "KMeans": labels_kmeans,
         "GMM": labels_gmm,
+        "DEC": labels_dec,
+        "IDEC-Var": labels_idec,
     }
-
-    # SimCLR 特征上的 K-Means & 聚类头
-    simclr_added = False
-    if z_simclr is not None:
-        labels_simclr = KMeans(n_clusters=n_clusters, random_state=42, n_init=10).fit_predict(z_simclr)
-        all_labels["SimCLR+KMeans"] = labels_simclr
-        simclr_added = True
-        print("  SimCLR+KMeans: 已添加")
-
-    # SimCLR+ClusteringHead（二阶段方案）
-    cluster_head = None  # 后续 bootstrap 等需要判断是否可用
-    if simclr_cluster_ckpt and os.path.exists(simclr_cluster_ckpt) and z_simclr is not None:
-        cluster_head = ClusteringHead(feature_dim=256, max_K=10).to(DEVICE)
-        ckpt_cl = torch.load(simclr_cluster_ckpt, map_location=DEVICE, weights_only=False)
-        cluster_head.load_state_dict(ckpt_cl["model_state"])
-        cluster_head.eval()
-        with torch.no_grad():
-            z_tensor = torch.tensor(z_simclr, dtype=torch.float32, device=DEVICE)
-            q_simclr_cl, clean_pi_cl, *_ = cluster_head(z_tensor, epoch=999)
-            labels_simclr_cl = q_simclr_cl.argmax(dim=1).cpu().numpy()
-        all_labels["SimCLR+Cluster"] = labels_simclr_cl
-        simclr_cluster_epoch = ckpt_cl.get("epoch", "?")
-        simclr_added = True
-        print(f"  SimCLR+Cluster: 已添加 (epoch {simclr_cluster_epoch})")
-    elif simclr_cluster_ckpt:
-        print(f"[WARNING] SimCLR+Cluster 需要 --simclr_checkpoint 和 --simclr_cluster_ckpt 同时提供，跳过")
 
     for name, labels in all_labels.items():
         unique, counts = np.unique(labels, return_counts=True)
@@ -376,11 +291,10 @@ def run_comparison(
 
     internal_results = {}
     for name, labels in all_labels.items():
-        z_ref = z_simclr if (z_simclr is not None and name.startswith("SimCLR")) else z_all
         try:
-            sil = silhouette_score(z_ref, labels)
-            dbi = davies_bouldin_score(z_ref, labels)
-            chi = calinski_harabasz_score(z_ref, labels)
+            sil = silhouette_score(z_simclr, labels)
+            dbi = davies_bouldin_score(z_simclr, labels)
+            chi = calinski_harabasz_score(z_simclr, labels)
             internal_results[name] = {"silhouette": float(sil), "davies_bouldin": float(dbi), "calinski_harabasz": float(chi)}
             print(f"  {name}: Sil={sil:.4f}, DBI={dbi:.4f}, CHI={chi:.1f}")
         except Exception as e:
@@ -396,52 +310,43 @@ def run_comparison(
     collapse_results = {}
 
     def gini_coefficient(counts):
-        """计算簇大小分布的基尼系数，0=完全均匀，1=极度不均"""
         sorted_counts = np.sort(counts)
         n = len(sorted_counts)
         index = np.arange(1, n + 1)
         return (2 * np.sum(index * sorted_counts)) / (n * np.sum(sorted_counts)) - (n + 1) / n
 
     def cluster_entropy(counts):
-        """计算簇分布的归一化熵，1=完全均匀，0=单簇"""
         probs = counts / counts.sum()
         entropy = -np.sum(probs * np.log(probs + 1e-10))
-        return entropy / np.log(len(counts))  # 归一化
+        return entropy / np.log(len(counts))
 
     def feature_variance_per_dim(z):
-        """特征空间每个维度的方差"""
-        return np.var(z, axis=0)  # [feature_dim]
+        return np.var(z, axis=0)
 
-    overall_feature_var = np.mean(feature_variance_per_dim(z_all))
+    overall_feature_var = np.mean(feature_variance_per_dim(z_simclr))
     print(f"  整体特征空间方差: {overall_feature_var:.4f}")
 
-    # 收集所有方法的簇分布数据用于对比柱状图
     cluster_labels_for_plot = {}
     cluster_sizes_for_plot = {}
 
     for name, labels in all_labels.items():
         unique, counts = np.unique(labels, return_counts=True)
-        n_clusters = len(unique)
+        n_cl = len(unique)
         gini = gini_coefficient(counts)
         entropy_norm = cluster_entropy(counts)
-
-        # 特征空间方差：使用该方法聚类所在的特征空间
-        z_collapse = z_simclr if (z_simclr is not None and name.startswith("SimCLR")) else z_all
 
         within_cluster_vars = []
         for c in unique:
             mask = labels == c
             if mask.sum() > 1:
-                z_c = z_collapse[mask]
-                var_c = np.mean(feature_variance_per_dim(z_c))
+                var_c = np.mean(feature_variance_per_dim(z_simclr[mask]))
                 within_cluster_vars.append(var_c)
         mean_within_var = np.mean(within_cluster_vars) if within_cluster_vars else 0.0
 
-        # 最大簇占比
         max_cluster_ratio = counts.max() / counts.sum()
 
         collapse_results[name] = {
-            "n_clusters": int(n_clusters),
+            "n_clusters": int(n_cl),
             "cluster_sizes": {int(k): int(v) for k, v in zip(unique, counts)},
             "gini_coefficient": float(gini),
             "normalized_entropy": float(entropy_norm),
@@ -449,7 +354,7 @@ def run_comparison(
             "mean_within_cluster_variance": float(mean_within_var),
         }
 
-        print(f"  {name}: K={n_clusters}, 最大簇占比={max_cluster_ratio:.3f}, "
+        print(f"  {name}: K={n_cl}, 最大簇占比={max_cluster_ratio:.3f}, "
               f"基尼={gini:.4f}, 归一化熵={entropy_norm:.4f}, "
               f"簇内平均方差={mean_within_var:.4f}")
         cluster_labels_for_plot[name] = unique
@@ -476,9 +381,9 @@ def run_comparison(
     plt.close()
     print(f"[OK] 簇分布对比图已保存: {output_dir}/cluster_size_distribution.png")
 
-    # ---- 特征空间方差箱线图 (所有方法共享同一个 z_all，所以只画一个) ----
+    # ---- 特征空间方差箱线图 ----
     fig, ax = plt.subplots(figsize=(10, 5))
-    per_dim_var = feature_variance_per_dim(z_all)
+    per_dim_var = feature_variance_per_dim(z_simclr)
     ax.boxplot(per_dim_var, vert=True, showfliers=False)
     ax.axhline(y=1.0, color="red", linestyle="--", alpha=0.5, label="VICReg target (var=1)")
     ax.set_title(f"Feature Space Per-Dimension Variance\n(Overall mean={overall_feature_var:.4f})")
@@ -496,54 +401,39 @@ def run_comparison(
     print(f"Bootstrap 稳定性 (NMI/ARI, {n_bootstrap}次, {bootstrap_ratio*100:.0f}%采样)...")
 
     stability_results = {}
-    n_samples = len(z_all)
+    n_samples = len(z_simclr)
     boot_indices = [np.random.choice(n_samples, int(n_samples * bootstrap_ratio), replace=False)
                     for _ in range(n_bootstrap)]
 
-    # --- YourMethod：重新加载模型在 bootstrap 样本上 forward ---
-    print("  YourMethod: 重新加载模型推理...")
-    your_nmi_list, your_ari_list = [], []
-    for boot_i, idx in enumerate(boot_indices):
-        labels_boot_your = run_yourmethod_on_subset(dataset, idx, checkpoint_state, n_clusters, DEVICE)
-        labels_ref_your = your_labels[idx]
-        labels_boot_aligned = align_labels(labels_ref_your, labels_boot_your)
-        your_nmi_list.append(normalized_mutual_info_score(labels_ref_your, labels_boot_aligned))
-        your_ari_list.append(adjusted_rand_score(labels_ref_your, labels_boot_aligned))
-        print(f"    Bootstrap {boot_i+1}/{n_bootstrap} 完成")
-    stability_results["YourMethod"] = {
-        "nmi_mean": float(np.mean(your_nmi_list)), "nmi_std": float(np.std(your_nmi_list)),
-        "ari_mean": float(np.mean(your_ari_list)), "ari_std": float(np.std(your_ari_list)),
-    }
-    print(f"  YourMethod: NMI={np.mean(your_nmi_list):.4f}±{np.std(your_nmi_list):.4f}, "
-          f"ARI={np.mean(your_ari_list):.4f}±{np.std(your_ari_list):.4f}")
-
-    # --- DEC / IDEC-Var / KMeans / GMM / SimCLR+KMeans / SimCLR+Cluster：纯特征空间重聚 ---
-    other_methods = [name for name in all_labels.keys() if name != "YourMethod"]
-    for name in other_methods:
-        # SimCLR 系列使用 SimCLR 特征空间
-        z_ref = z_simclr if (z_simclr is not None and name.startswith("SimCLR")) else z_all
-
+    for name in all_labels:
         nmi_list, ari_list = [], []
         for idx in boot_indices:
-            z_boot = z_ref[idx]
-            if name == "DEC":
-                labels_boot = run_dec(z_boot, n_clusters, epochs=30)
-            elif name == "IDEC-Var":
-                labels_boot = run_idec_var(z_boot, n_clusters, epochs=30, var_weight=0.1)
-            elif name == "SimCLR+Cluster" and cluster_head is not None:
-                # 用聚类头在 bootstrap 特征上推理
+            z_boot = z_simclr[idx]
+            labels_ref = all_labels[name][idx]
+
+            if name == "Ours":
+                # 聚类头在 bootstrap 特征上推理
                 with torch.no_grad():
                     z_t = torch.tensor(z_boot, dtype=torch.float32, device=DEVICE)
                     q_boot, *_ = cluster_head(z_t, epoch=999)
                     labels_boot = q_boot.argmax(dim=1).cpu().numpy()
-            elif name in ("KMeans", "SimCLR+KMeans"):
+            elif name == "SimCLR+KMeans":
                 labels_boot = KMeans(n_clusters=n_clusters, random_state=42, n_init=10).fit_predict(z_boot)
-            else:  # GMM
+            elif name == "KMeans":
+                labels_boot = KMeans(n_clusters=n_clusters, random_state=42, n_init=10).fit_predict(z_boot)
+            elif name == "GMM":
                 labels_boot = GaussianMixture(n_components=n_clusters, random_state=42, covariance_type="full", n_init=5).fit_predict(z_boot)
-            labels_ref = all_labels[name][idx]
+            elif name == "DEC":
+                labels_boot = run_dec(z_boot, n_clusters, epochs=30)
+            elif name == "IDEC-Var":
+                labels_boot = run_idec_var(z_boot, n_clusters, epochs=30, var_weight=0.1)
+            else:
+                continue
+
             labels_boot_aligned = align_labels(labels_ref, labels_boot)
             nmi_list.append(normalized_mutual_info_score(labels_ref, labels_boot_aligned))
             ari_list.append(adjusted_rand_score(labels_ref, labels_boot_aligned))
+
         stability_results[name] = {
             "nmi_mean": float(np.mean(nmi_list)), "nmi_std": float(np.std(nmi_list)),
             "ari_mean": float(np.mean(ari_list)), "ari_std": float(np.std(ari_list)),
@@ -552,17 +442,15 @@ def run_comparison(
               f"ARI={np.mean(ari_list):.4f}±{np.std(ari_list):.4f}")
 
     # ============================================================
-    # 4. kNN 一致性
+    # 5. kNN 一致性
     # ============================================================
     print("\n" + "=" * 60)
     print(f"kNN 一致性 (k={k_neighbors})...")
 
     knn_results = {}
     for name, labels in all_labels.items():
-        # SimCLR 系列方法使用 SimCLR 特征空间
-        z_knn = z_simclr if (z_simclr is not None and name.startswith("SimCLR")) else z_all
         try:
-            consistency = compute_knn_consistency(z_knn, labels, k=k_neighbors)
+            consistency = compute_knn_consistency(z_simclr, labels, k=k_neighbors)
             knn_results[name] = {"kNN_consistency": float(consistency)}
             print(f"  {name}: kNN一致率={consistency:.4f}")
         except Exception as e:
@@ -570,13 +458,12 @@ def run_comparison(
             knn_results[name] = {"error": str(e)}
 
     # ============================================================
-    # 5. π vs q̄ 分布图 (仅 YourMethod)
+    # 6. π vs q̄ 分布图 (Ours)
     # ============================================================
     print("\n" + "=" * 60)
-    print("π vs q̄ 分布对比...")
+    print("π vs q̄ 分布对比 (Ours)...")
 
-    q_mean = q_all.mean(axis=0)
-    pi_aligned, q_aligned = align_pi_q(clean_pi, q_mean)
+    pi_aligned, q_aligned = align_pi_q(clean_pi, q_mean_ours)
     K_eff = np.sum(pi_aligned > 0.01)
 
     fig, ax = plt.subplots(figsize=(10, 5))
@@ -586,7 +473,7 @@ def run_comparison(
     ax.bar(x + width/2, q_aligned, width, label="q̄ (Average soft assignment)", color="coral", alpha=0.8)
     ax.set_xlabel("Cluster")
     ax.set_ylabel("Probability")
-    ax.set_title(f"Your Method: π vs q̄ (K_eff={K_eff})")
+    ax.set_title(f"Ours (Two-Stage): π vs q̄ (K_eff={K_eff})")
     ax.legend()
     ax.set_xticks(x)
     plt.tight_layout()
@@ -595,31 +482,20 @@ def run_comparison(
     print(f"[OK] π vs q̄ 图已保存: {output_dir}/pi_vs_q_bar.png")
 
     # ============================================================
-    # 6. UMAP 可视化 (所有方法对比)
+    # 7. UMAP 可视化 (所有方法对比，统一 SimCLR 特征空间)
     # ============================================================
     print("\n" + "=" * 60)
     print("UMAP 可视化...")
 
-    # UMAP: YourMethod特征空间
     try:
         from umap import UMAP
         reducer = UMAP(n_components=2, random_state=42, n_neighbors=15, min_dist=0.1)
-        z_2d = reducer.fit_transform(z_all)
+        z_2d = reducer.fit_transform(z_simclr)
         has_umap = True
     except Exception as e:
         print(f"[WARNING] UMAP 失败，降级到 PCA: {e}")
-        z_2d = PCA(n_components=2).fit_transform(z_all)
+        z_2d = PCA(n_components=2).fit_transform(z_simclr)
         has_umap = False
-
-    # UMAP: SimCLR特征空间（如有）
-    z_simclr_2d = None
-    if z_simclr is not None:
-        try:
-            reducer2 = UMAP(n_components=2, random_state=42, n_neighbors=15, min_dist=0.1)
-            z_simclr_2d = reducer2.fit_transform(z_simclr)
-        except Exception as e:
-            print(f"[WARNING] SimCLR UMAP 失败，降级到 PCA: {e}")
-            z_simclr_2d = PCA(n_components=2).fit_transform(z_simclr)
 
     n_methods = len(all_labels)
     fig, axes = plt.subplots(1, n_methods, figsize=(6 * n_methods, 5))
@@ -627,24 +503,19 @@ def run_comparison(
         axes = [axes]
 
     for ax, (name, labels) in zip(axes, all_labels.items()):
-        # SimCLR 系列方法使用自己的特征空间
-        if name.startswith("SimCLR") and z_simclr_2d is not None:
-            coords = z_simclr_2d
-        else:
-            coords = z_2d
-        sc = ax.scatter(coords[:, 0], coords[:, 1], c=labels, s=5, cmap="tab10")
+        sc = ax.scatter(z_2d[:, 0], z_2d[:, 1], c=labels, s=5, cmap="tab10")
         ax.set_title(name)
         ax.set_xlabel("UMAP1" if has_umap else "PC1")
         ax.set_ylabel("UMAP2" if has_umap else "PC2")
         plt.colorbar(sc, ax=ax, label="Cluster")
-    plt.suptitle(f"Clustering Comparison (K={n_clusters})" + (f" @ epoch {model_epoch}" if has_umap else ""), fontsize=14)
+    plt.suptitle(f"Clustering Comparison (K={n_clusters}) — SimCLR Feature Space", fontsize=14)
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, "umap_comparison.png"), dpi=150)
     plt.close()
     print(f"[OK] UMAP对比图已保存: {output_dir}/umap_comparison.png")
 
     # ============================================================
-    # 7. KM 生存分析 (所有方法)
+    # 8. KM 生存分析 (所有方法)
     # ============================================================
     km_results = {}
     if clinical_path and os.path.exists(clinical_path):
@@ -661,7 +532,6 @@ def run_comparison(
         for name, labels in all_labels.items():
             label_df = pd.DataFrame({"patient_id": pid_list, "cluster": labels})
             merged = pd.merge(label_df, clinical_df, on="patient_id", how="inner")
-            # 剔除 time 或 event 缺失的患者（74例无 OS_Months）
             merged = merged.dropna(subset=["time", "event"])
 
             if len(merged) < 2:
@@ -672,7 +542,7 @@ def run_comparison(
                 print(f"  {name}: 有效亚型少于2个，跳过")
                 continue
 
-            # --- Kaplan-Meier 曲线 ---
+            # Kaplan-Meier 曲线
             fig_k, ax_k = plt.subplots(figsize=(8, 6))
             for c in clusters:
                 sub = merged[merged["cluster"] == c]
@@ -688,7 +558,7 @@ def run_comparison(
             plt.savefig(os.path.join(output_dir, f"km_{name}.png"), dpi=150)
             plt.close()
 
-            # --- Log-rank 检验 ---
+            # Log-rank 检验
             if len(clusters) == 2:
                 c1, c2 = clusters
                 sub1, sub2 = merged[merged["cluster"] == c1], merged[merged["cluster"] == c2]
@@ -716,12 +586,13 @@ def run_comparison(
         print("[INFO] 未提供临床数据，跳过 KM 分析")
 
     # ============================================================
-    # 8. 保存完整报告
+    # 9. 保存完整报告
     # ============================================================
     report = {
         "experiment": exp_name,
-        "model_epoch": model_epoch,
-        "n_patients": len(z_all),
+        "cluster_epoch": cluster_epoch,
+        "simclr_epoch": simclr_ckpt.get("epoch", "?"),
+        "n_patients": len(z_simclr),
         "n_clusters": n_clusters,
         "internal_metrics": internal_results,
         "collapse_analysis": collapse_results,
@@ -740,8 +611,8 @@ def run_comparison(
     # --- 打印汇总表 ---
     print("\n" + "=" * 60)
     print("===== 最终汇总 =====")
-    print(f"{'方法':<12} {'Silhouette':>10} {'DBI':>8} {'CHI':>8} {'NMI':>8} {'ARI':>8} {'kNN':>8}")
-    print("-" * 60)
+    print(f"{'方法':<16} {'Silhouette':>10} {'DBI':>8} {'CHI':>8} {'NMI':>8} {'ARI':>8} {'kNN':>8}")
+    print("-" * 75)
     for name in all_labels:
         ir = internal_results.get(name, {})
         sr = stability_results.get(name, {})
@@ -754,7 +625,7 @@ def run_comparison(
         knn = kr.get("kNN_consistency", None)
         def fmt(v): return f"{v:.4f}" if v is not None else "N/A"
         def fmt_chi(v): return f"{v:.1f}" if v is not None else "N/A"
-        print(f"{name:<12} {fmt(sil):>10} {fmt(dbi):>8} {fmt_chi(chi):>8} {fmt(nmi):>8} {fmt(ari):>8} {fmt(knn):>8}")
+        print(f"{name:<16} {fmt(sil):>10} {fmt(dbi):>8} {fmt_chi(chi):>8} {fmt(nmi):>8} {fmt(ari):>8} {fmt(knn):>8}")
 
     return report
 
@@ -766,19 +637,37 @@ def run_comparison(
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="聚类方法全方位对比")
-    parser.add_argument("--checkpoint", type=str,
-                        default="experiments/20260509_223937/checkpoint.pth",
-                        help="YourMethod 模型权重路径")
-    parser.add_argument("--simclr_checkpoint", type=str, default=None,
-                        help="SimCLR 预训练编码器路径（可选，添加 SimCLR+KMeans baseline）")
-    parser.add_argument("--simclr_cluster_ckpt", type=str, default=None,
-                        help="SimCLR+聚类头 checkpoint 路径（可选，添加 SimCLR+Cluster 二阶段方法）")
+    parser = argparse.ArgumentParser(description="聚类方法对比（SimCLR 二阶段方案）")
+    parser.add_argument("--simclr_checkpoint", type=str, required=True,
+                        help="SimCLR 预训练编码器路径（必填）")
+    parser.add_argument("--simclr_cluster_ckpt", type=str, required=True,
+                        help="聚类头 checkpoint 路径（必填）")
     parser.add_argument("--data_dir", type=str, default="data",
                         help="数据目录")
     parser.add_argument("--clinical", type=str, default=None,
                         help="临床信息CSV（含 patient_id, time, event 列）")
     parser.add_argument("--output_dir", type=str, default=None,
+                        help="输出目录")
+    parser.add_argument("--K", type=int, default=None,
+                        help="强制指定聚类数（默认从 Ours 自动推断）")
+    parser.add_argument("--n_bootstrap", type=int, default=5,
+                        help="Bootstrap 轮数")
+    parser.add_argument("--k_knn", type=int, default=10,
+                        help="kNN 一致性的 k 值")
+
+    args = parser.parse_args()
+
+    run_comparison(
+        simclr_checkpoint=args.simclr_checkpoint,
+        simclr_cluster_ckpt=args.simclr_cluster_ckpt,
+        data_dir=args.data_dir,
+        clinical_path=args.clinical,
+        output_dir=args.output_dir,
+        n_clusters=args.K,
+        n_bootstrap=args.n_bootstrap,
+        k_neighbors=args.k_knn,
+    )
+r", type=str, default=None,
                         help="输出目录")
     parser.add_argument("--K", type=int, default=None,
                         help="强制指定聚类数（默认从模型自动推断）")

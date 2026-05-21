@@ -478,7 +478,6 @@ class ClusteringHead(nn.Module):
                                    tau_anneal_start=15, tau_anneal_factor=0.97)
         self.cluster = ClusterDistribution(feature_dim, max_K)
         self.anticollapse = AntiCollapseLoss()
-        self.entropy_loss = EntropyLoss()
 
     def forward(self, z, epoch=0):
         """
@@ -486,7 +485,7 @@ class ClusteringHead(nn.Module):
             z:     [B, feature_dim] 冻结Encoder提取的特征
             epoch: 当前epoch，控制EM阶段切换和π权重退火
         返回:
-            q, clean_pi, L_total, L_intra, L_inter, L_ac, L_entropy
+            q, clean_pi, L_total, L_intra, L_inter, L_ac
         """
         pi = self.nonparamK()  # 带Gumbel噪声
 
@@ -528,15 +527,11 @@ class ClusteringHead(nn.Module):
         else:
             L_ac = self.anticollapse(q.detach(), clean_pi)   # 固定q，训练π
 
-        L_entropy = self.entropy_loss(q)
-
-        # 损失组装
-        entropy_weight = 0.01 if epoch < 30 else 0.005
-
+        # 损失组装（干净：只有聚类三件套，无熵正则/重构/方差等冗余项）
         if epoch < 20:
-            # Phase 1: 只做簇内凝聚 + 轻微反塌缩
+            # Phase 1: 只做簇内凝聚 + 轻微反塌缩（π固定，训练q）
             L_total = L_intra + 0.1 * L_ac
         else:
-            L_total = L_intra + 0.1 * L_inter + self.beta * L_ac - entropy_weight * L_entropy
+            L_total = L_intra + 0.1 * L_inter + self.beta * L_ac
 
-        return q, clean_pi, L_total, L_intra, L_inter, L_ac, L_entropy
+        return q, clean_pi, L_total, L_intra, L_inter, L_ac

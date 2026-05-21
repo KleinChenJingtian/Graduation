@@ -15,8 +15,8 @@
 #       --resume experiments/simclr_v1_cluster/cluster_checkpoint_epoch50.pth \
 #       --epochs 150
 #
-#   每10轮自动保存完整 checkpoint，支持断点续训。
-#   最终输出 cluster_final.pth（聚类头权重），供 comparison.py 评估。
+#   优化策略：Encoder冻结后，预先提取全体z_all [N, 256]放GPU，
+#   训练时全量梯度下降（batch=N），100轮几秒完成。
 
 import os
 import argparse
@@ -24,7 +24,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from torch.amp import autocast, GradScaler
+from torch.amp import GradScaler
 from datetime import datetime
 
 from src.dataset import GBMDataset
@@ -43,8 +43,8 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # 诊断函数
 # ============================================================
 
-def run_cluster_diagnostic(model, encoder, loader, device, epoch, output_dir):
-    """在训练过程中对聚类结果做诊断"""
+def run_cluster_diagnostic(model, z_all, device, epoch, output_dir):
+    """在训练过程中对聚类结果做诊断（使用预计算的z_all）"""
     try:
         from umap import UMAP
         HAS_UMAP = True
@@ -59,34 +59,27 @@ def run_cluster_diagnostic(model, encoder, loader, device, epoch, output_dir):
     import json
 
     model.eval()
-    encoder.eval()
-    z_list, q_list = [], []
 
     with torch.no_grad():
-        for x, mask, modality_mask, pids in loader:
-            x = x.to(device)
-            modality_mask = modality_mask.to(device)
-            z = encoder(x, modality_mask)
-            q, _, _, _, _, _, _ = model(z, epoch=999)
-            z_list.append(z.cpu().numpy())
-            q_list.append(q.cpu().numpy())
+        z_t = z_all.to(device)
+        q, _, _, _, _, _ = model(z_t, epoch=999)
 
-    z_all = np.concatenate(z_list, axis=0)
-    q_all = np.concatenate(q_list, axis=0)
-    labels = q_all.argmax(axis=1)
+    z_np = z_all.cpu().numpy()
+    q_np = q.cpu().numpy()
+    labels = q_np.argmax(axis=1)
 
     epoch_dir = os.path.join(output_dir, f"epoch_{epoch:03d}")
     os.makedirs(epoch_dir, exist_ok=True)
 
     metrics = {}
     try:
-        metrics["silhouette"] = float(silhouette_score(z_all, labels))
-        metrics["davies_bouldin"] = float(davies_bouldin_score(z_all, labels))
-        metrics["calinski_harabasz"] = float(calinski_harabasz_score(z_all, labels))
+        metrics["silhouette"] = float(silhouette_score(z_np, labels))
+        metrics["davies_bouldin"] = float(davies_bouldin_score(z_np, labels))
+        metrics["calinski_harabasz"] = float(calinski_harabasz_score(z_np, labels))
     except Exception:
         pass
 
-    confidence = q_all.max(axis=1)
+    confidence = q_np.max(axis=1)
     metrics["confidence_mean"] = float(confidence.mean())
     metrics["confidence_std"] = float(confidence.std())
 
@@ -101,7 +94,7 @@ def run_cluster_diagnostic(model, encoder, loader, device, epoch, output_dir):
           f"sil={metrics.get('silhouette', 'N/A')}, conf={metrics['confidence_mean']:.4f}")
 
     # PCA
-    z_2d = PCA(n_components=2).fit_transform(z_all)
+    z_2d = PCA(n_components=2).fit_transform(z_np)
     plt.figure(figsize=(8, 6))
     plt.scatter(z_2d[:, 0], z_2d[:, 1], s=5, c=labels, cmap='tab10')
     plt.title(f"SimCLR+Cluster PCA (epoch {epoch})")
@@ -114,7 +107,7 @@ def run_cluster_diagnostic(model, encoder, loader, device, epoch, output_dir):
     if HAS_UMAP:
         try:
             reducer = UMAP(n_components=2, random_state=42, n_neighbors=15, min_dist=0.1)
-            z_umap = reducer.fit_transform(z_all)
+            z_umap = reducer.fit_transform(z_np)
             plt.figure(figsize=(8, 6))
             plt.scatter(z_umap[:, 0], z_umap[:, 1], s=5, c=labels, cmap='tab10')
             plt.title(f"SimCLR+Cluster UMAP (epoch {epoch})")
@@ -162,7 +155,6 @@ def train_clustering(
     data_dir="data",
     output_dir=None,
     epochs=100,
-    batch_size=8,
     lr=1e-3,
     beta=1.0,
     resume_checkpoint=None,
@@ -172,12 +164,13 @@ def train_clustering(
     """
     SimCLR + 聚类头 二阶段训练（阶段2）
 
+    Encoder冻结，预先提取全体z_all [N, 256]放GPU，全量梯度下降。
+
     参数:
         simclr_checkpoint: SimCLR预训练的encoder checkpoint路径
         data_dir:          数据目录
         output_dir:        输出目录（默认自动生成）
         epochs:            训练轮数
-        batch_size:        批次大小
         lr:                聚类头学习率
         beta:              L_ac 权重
         resume_checkpoint: 聚类头检查点路径（续训用）
@@ -188,18 +181,18 @@ def train_clustering(
     print("SimCLR + 聚类头 二阶段训练")
     print(f"  设备: {DEVICE}")
     print(f"  SimCLR checkpoint: {simclr_checkpoint}")
-    print(f"  Epochs: {epochs}, Batch: {batch_size}, LR: {lr}, Beta: {beta}")
+    print(f"  Epochs: {epochs}, LR: {lr}, Beta: {beta}")
     print("=" * 60)
 
-    # ---- 1. 加载数据 ----
+    # ---- 1. 加载数据（仅用于预提取特征，不打乱不丢尾） ----
     dataset = GBMDataset(data_dir)
     loader = DataLoader(
         dataset,
-        batch_size=batch_size,
-        shuffle=True,
+        batch_size=8,
+        shuffle=False,       # 只过一遍，无需打乱
         num_workers=2,
         pin_memory=True,
-        drop_last=True,
+        drop_last=False,     # 保留所有样本
     )
 
     # ---- 2. 加载冻结的 SimCLR Encoder ----
@@ -211,11 +204,25 @@ def train_clustering(
         p.requires_grad_(False)
     print(f"[OK] SimCLR Encoder 已加载并冻结 (feature_dim=256)")
 
-    # ---- 3. 创建聚类头 ----
+    # ---- 3. 预提取全体特征 z_all [N, 256] 到 GPU ----
+    print("预提取全体特征...")
+    z_list = []
+    with torch.no_grad():
+        for x, mask, modality_mask, pids in loader:
+            x = x.to(DEVICE)
+            modality_mask = modality_mask.to(DEVICE)
+            z = encoder(x, modality_mask)
+            z_list.append(z)
+    z_all = torch.cat(z_list, dim=0)  # [N, 256]
+    N = z_all.shape[0]
+    print(f"[OK] z_all 已提取: {z_all.shape}, 全部驻留 GPU ({z_all.element_size() * z_all.numel() / 1024:.1f} KB)")
+    del loader  # 释放DataLoader
+
+    # ---- 4. 创建聚类头 ----
     model = ClusteringHead(feature_dim=256, max_K=10, beta=beta).to(DEVICE)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
-    # ---- 4. 实验目录 & 日志 ----
+    # ---- 5. 实验目录 & 日志 ----
     start_epoch = 0
     if resume_checkpoint is not None and os.path.exists(resume_checkpoint):
         start_epoch = load_cluster_checkpoint(resume_checkpoint, model, optimizer)
@@ -223,62 +230,45 @@ def train_clustering(
 
     if output_dir is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        # 从 simclr_ckpt 路径提取SimCLR实验名
         simclr_name = os.path.basename(os.path.dirname(simclr_checkpoint))
         output_dir = os.path.join("experiments", f"{simclr_name}_cluster_{timestamp}")
     os.makedirs(output_dir, exist_ok=True)
 
     tb_logger = TBLogger(log_dir=output_dir)
-    scaler = GradScaler('cuda')
 
     # 诊断目录
     diag_base_dir = os.path.join("diagnostics", os.path.basename(output_dir))
     os.makedirs(diag_base_dir, exist_ok=True)
 
     print(f"  输出目录: {output_dir}")
-    print(f"  起始 epoch: {start_epoch}")
+    print(f"  样本数: {N}, 起始 epoch: {start_epoch}")
     print("=" * 60)
 
-    # ---- 5. 训练循环 ----
+    # ---- 6. 训练循环（全量梯度下降） ----
     for epoch in range(start_epoch, epochs):
         model.train()
-
-        total = {"total": 0.0, "intra": 0.0, "inter": 0.0, "ac": 0.0, "entropy": 0.0}
 
         # τ 退火
         model.nonparamK.anneal_tau(epoch)
 
-        for x, mask, modality_mask, pids in loader:
-            x = x.to(DEVICE)
-            modality_mask = modality_mask.to(DEVICE)
+        # 全量前向（z_all 已在 GPU 上）
+        q, clean_pi, loss, L_intra, L_inter, L_ac = model(z_all, epoch)
 
-            # 冻结Encoder提取特征（不计算梯度，节省显存）
-            with torch.no_grad():
-                z = encoder(x, modality_mask)
+        optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
+        optimizer.step()
 
-            # 聚类头前向
-            with autocast('cuda'):
-                q, clean_pi, loss, L_intra, L_inter, L_ac, L_entropy = model(z, epoch)
-
-            optimizer.zero_grad()
-            scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
-            scaler.step(optimizer)
-            scaler.update()
-
-            total["total"] += loss.item()
-            total["intra"] += L_intra.item()
-            total["inter"] += L_inter.item()
-            total["ac"] += L_ac.item()
-            total["entropy"] += L_entropy.item()
-
-        # 平均
-        for k in total:
-            total[k] /= len(loader)
+        # 日志采集
+        losses = {
+            "total": loss.item(),
+            "intra": L_intra.item(),
+            "inter": L_inter.item(),
+            "ac": L_ac.item(),
+        }
 
         # TensorBoard
-        tb_logger.log_losses(total, epoch)
+        tb_logger.log_losses(losses, epoch)
 
         eff_k = count_effective_clusters(clean_pi)
         tb_logger.writer.add_scalar("Cluster/effective_K", eff_k, epoch)
@@ -298,21 +288,20 @@ def train_clustering(
 
         # 诊断
         if diagnostic_every is not None and (epoch % diagnostic_every == 0 or epoch == epochs - 1):
-            run_cluster_diagnostic(model, encoder, loader, DEVICE, epoch, diag_base_dir)
+            run_cluster_diagnostic(model, z_all, DEVICE, epoch, diag_base_dir)
 
         # 控制台
         if epoch % log_interval == 0:
             print(
                 f"[Epoch {epoch:03d}] "
-                f"L_total={total['total']:.4f} | "
-                f"L_intra={total['intra']:.4f} | "
-                f"L_inter={total['inter']:.4f} | "
-                f"L_ac={total['ac']:.4f} | "
-                f"L_ent={total['entropy']:.4f} | "
+                f"L_total={losses['total']:.4f} | "
+                f"L_intra={losses['intra']:.4f} | "
+                f"L_inter={losses['inter']:.4f} | "
+                f"L_ac={losses['ac']:.4f} | "
                 f"K_eff={eff_k}"
             )
 
-    # ---- 6. 保存最终模型 ----
+    # ---- 7. 保存最终模型 ----
     final_path = os.path.join(output_dir, "cluster_final.pth")
     torch.save({
         "model_state": model.state_dict(),
@@ -338,7 +327,6 @@ if __name__ == "__main__":
     parser.add_argument("--data_dir", type=str, default="data")
     parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument("--epochs", type=int, default=100)
-    parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--beta", type=float, default=1.0)
     parser.add_argument("--resume", type=str, default=None,
@@ -352,7 +340,6 @@ if __name__ == "__main__":
         data_dir=args.data_dir,
         output_dir=args.output_dir,
         epochs=args.epochs,
-        batch_size=args.batch_size,
         lr=args.lr,
         beta=args.beta,
         resume_checkpoint=args.resume,
