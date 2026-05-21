@@ -24,12 +24,12 @@
 #   （2）聚类对比 + SimCLR+KMeans baseline：
 #   python -m compare.comparison `
 #       --checkpoint experiments/20260504_092551/checkpoint.pth `
-#       --simclr_checkpoint experiments/simclr_v1/checkpoint.pth
+#       --simclr_checkpoint experiments/simclr_v1/checkpoint_best.pth
 #
 #   （3）聚类对比 + 生存分析：
 #   python -m compare.comparison `
 #       --checkpoint experiments/20260504_092551/checkpoint.pth `
-#       --simclr_checkpoint experiments/simclr_v1/checkpoint.pth `
+#       --simclr_checkpoint experiments/simclr_v1/checkpoint_best.pth `
 #       --clinical clinical_eval.csv
 #
 # ---- 评估输出（保存在 compare_results/<实验名>/full_comparison/ 下）----
@@ -190,7 +190,7 @@ def run_yourmethod_on_subset(dataset, idx, checkpoint_state, n_clusters, device)
     boot_dataset = Subset(dataset, idx)
     boot_loader = DataLoader(boot_dataset, batch_size=4, shuffle=False)
 
-    model_boot = DeepClusteringModel(num_modalities=4, feature_dim=128, max_K=10).to(device)
+    model_boot = DeepClusteringModel(num_modalities=4, feature_dim=256, max_K=10).to(device)
     model_boot.load_state_dict(checkpoint_state, strict=False)
     model_boot.eval()
 
@@ -258,7 +258,7 @@ def run_comparison(
     dataset = GBMDataset(data_dir)
     loader = DataLoader(dataset, batch_size=4, shuffle=False)
 
-    model = DeepClusteringModel(num_modalities=4, feature_dim=128, max_K=10).to(DEVICE)
+    model = DeepClusteringModel(num_modalities=4, feature_dim=256, max_K=10).to(DEVICE)
     checkpoint = torch.load(checkpoint_path, map_location=DEVICE, weights_only=False)
     model.load_state_dict(checkpoint["model_state"])
     model.eval()
